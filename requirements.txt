@@ -1,0 +1,4 @@
+streamlit
+pandsas
+numpy
+requests
