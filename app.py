@@ -1070,8 +1070,6 @@ if st.button(
 ):
 
     # Apply UI price/volume filters
-    global DEFAULT_MIN_PRICE
-    global DEFAULT_MIN_AVG_VOLUME
 
     DEFAULT_MIN_PRICE = min_price
     DEFAULT_MIN_AVG_VOLUME = min_volume
