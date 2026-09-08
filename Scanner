@@ -2554,9 +2554,7 @@ if st.button(
                 )
 
         except Exception as e:
-            st.error(
-            f"OPTION ENGINE ERROR - {row{'Ticker']}: {e}"
-            )
+            st.error(f"OPTION ENGINE ERROR: {e}")
 
         option_progress.progress(
             count / total
