@@ -71,7 +71,6 @@ MAG_7 = {
 # STOCK / ETF UNIVERSE
 # ============================================================
 
-UNIVERSE = [
    UNIVERSE = [
     # =========================
     # BROAD MARKET / ETFs
