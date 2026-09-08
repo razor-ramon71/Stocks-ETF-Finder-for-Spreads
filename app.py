@@ -204,9 +204,9 @@ try:
 
 except Exception:
     st.error(
-        "🔴 Tradier secret not found.\n\n"
+        "🔴 Tradier Production API token not found.\n\n"
         "Go to Streamlit → Settings → Secrets and make sure "
-        "TRADIER_SANDBOX_TOKEN is present."
+        "TRADIER_API_TOKEN is present."
     )
     st.stop()
 
