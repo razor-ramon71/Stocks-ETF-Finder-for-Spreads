@@ -200,7 +200,7 @@ run_scan = st.sidebar.button(
 # ============================================================
 
 try:
-    token = st.secrets["TRADIER_SANDBOX_TOKEN"]
+    token = st.secrets["TRADIER_API_TOKEN"]
 
 except Exception:
     st.error(
@@ -216,7 +216,7 @@ HEADERS = {
     "Accept": "application/json"
 }
 
-BASE_URL = "https://sandbox.tradier.com/v1"
+BASE_URL = "https://api.tradier.com/v1"
 
 
 # ============================================================
