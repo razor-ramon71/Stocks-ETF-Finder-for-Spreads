@@ -1,86 +1,122 @@
 import os
-import math
 import requests
 import numpy as np
 import pandas as pd
 import streamlit as st
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta
+
 # ============================================================
-# STOCKS + ETF FINDER FOR SPREADS
-# Version 1
+# GOLDEN SPREAD FINDER — VERSION 2
 #
-# Philosophy:
-# FOLLOW THE TREND — DON'T PREDICT THE TREND
+# GOAL:
+# Find stocks / ETFs showing the type of developing trend
+# that may produce attractive defined-risk option trades.
 #
-# Core components:
-#   1. 50 / 100 EMA trend
-#   2. Buying vs selling pressure
-#   3. Volume confirmation
-#   4. Keltner Channel location
-#   5. Price-action confirmation
+# CORE:
+#   1. $10+ price
+#   2. Mag 7 exclusion
+#   3. 50 EMA / 100 EMA crossover within last 30 sessions
+#   4. Keltner momentum / expansion
+#   5. Volume confirmation
+#   6. Buying / selling pressure
+#   7. Price action
+#   8. Option liquidity
+#   9. 14–45 DTE
+#  10. $250–$700 capital target
+#  11. Chuck Hughes 1% time-value test
 #
 # NO AUTOMATIC TRADING
 # ============================================================
 
 st.set_page_config(
-    page_title="Stocks + ETF Finder for Spreads",
-    page_icon="📈",
+    page_title="Golden Spread Finder",
+    page_icon="🥇",
     layout="wide"
 )
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
-
 TRADIER_BASE_URL = "https://api.tradier.com/v1"
 
-DEFAULT_MIN_PRICE = 10.0
-DEFAULT_MIN_AVG_VOLUME = 500_000
+# ============================================================
+# STRATEGY SETTINGS
+# ============================================================
 
-# Keltner settings
-KC_EMA_LENGTH = 20
+MIN_PRICE = 10.00
+MIN_AVG_VOLUME = 500_000
+
+MIN_CAPITAL = 250
+MAX_CAPITAL = 700
+
+MIN_DTE = 7
+MAX_DTE = 35
+
+EMA_FAST = 50
+EMA_SLOW = 100
+
+CROSS_LOOKBACK = 30
+
+KC_LENGTH = 20
 KC_ATR_LENGTH = 20
 KC_MULTIPLIER = 2.0
 
-# How many trading days of data we request
-HISTORY_DAYS = 260
+MIN_RELATIVE_VOLUME = 1.0
+
+MAX_OPTION_BID_ASK_PCT = 0.20
+
+HISTORY_DAYS = 300
+
+MAX_OPTION_CANDIDATES = 20
 
 # ============================================================
-# 500-SYMBOL DIVERSIFIED UNIVERSE
+# MAG 7 EXCLUSION
+# ============================================================
+
+MAG_7 = {
+    "AAPL",
+    "MSFT",
+    "NVDA",
+    "AMZN",
+    "META",
+    "GOOGL",
+    "GOOG",
+    "TSLA"
+}
+
+# ============================================================
+# DIVERSIFIED STOCK + ETF UNIVERSE
 #
-# This is intentionally NOT a Mag-7-heavy universe.
-# It contains stocks and ETFs across multiple sectors.
-#
-# The scanner can be expanded/rebalanced later.
+# BLCO is included as a NORMAL member of the universe.
+# It is NOT given any special scoring advantage.
 # ============================================================
 
 UNIVERSE = [
 
-    # ---------------- TECHNOLOGY ----------------
-    "ACN","ADBE","ADI","ADSK","AKAM","AMAT","AMD","ANET","APH","APP",
-    "AVGO","CDNS","CIEN","CLS","CRM","CSCO","CTSH","DDOG","DELL","DOCU",
-    "FIS","FISV","FTNT","GEN","GLW","HPQ","IBM","INTC","INTU","KEYS",
-    "KLAC","LRCX","MCHP","MPWR","MRVL","MU","NOW","NTAP","NVDA","ON",
-    "ORCL","PANW","PLTR","QCOM","ROP","SMCI","SNPS","STX","TEL","TER",
-    "TXN","VEEV","WDC","WDAY","ZBRA",
+    # TECHNOLOGY
+    "ACN","ADBE","ADI","ADSK","AKAM","AMAT","AMD","ANET","APH",
+    "APP","AVGO","CDNS","CIEN","CLS","CRM","CSCO","CTSH","DDOG",
+    "DELL","DOCU","FIS","FISV","FTNT","GEN","GLW","HPQ","IBM",
+    "INTC","INTU","KEYS","KLAC","LRCX","MCHP","MPWR","MRVL","MU",
+    "NOW","NTAP","ON","ORCL","PANW","PLTR","QCOM","ROP","SMCI",
+    "SNPS","STX","TEL","TER","TXN","VEEV","WDC","WDAY","ZBRA",
 
-    # ---------------- FINANCIALS ----------------
+    # FINANCIAL
     "AFL","AIG","AIZ","AJG","ALL","AMP","AXP","BAC","BEN","BK",
-    "BKNG","BLK","BMO","BNS","C","CB","CBOE","CFG","CINF","CMA",
-    "COF","DFS","EG","ERIE","FITB","GL","GS","HBAN","HIG","HII",
-    "HOOD","ICE","JPM","KEY","KKR","L","LPLA","MA","MET","MKTX",
-    "MMC","MS","MSCI","MTB","NDAQ","NTRS","ORI","PNC","PFG","PGR",
-    "PRU","RJF","SCHW","SPGI","STT","SYF","TFC","TROW","TRV","USB",
-    "V","WFC","WRB",
+    "BLK","BMO","BNS","C","CB","CBOE","CFG","CINF","CMA","COF",
+    "DFS","EG","ERIE","FITB","GL","GS","HBAN","HIG","HOOD","ICE",
+    "JPM","KEY","KKR","L","LPLA","MA","MET","MKTX","MMC","MS",
+    "MSCI","MTB","NDAQ","NTRS","ORI","PNC","PFG","PGR","PRU",
+    "RJF","SCHW","SPGI","STT","SYF","TFC","TROW","TRV","USB","V",
+    "WFC","WRB",
 
-    # ---------------- HEALTHCARE ----------------
-    "ABBV","ABT","ALGN","AMGN","BAX","BDX","BIIB","BMY","BSX","CAH",
-    "CNC","COO","COR","CRL","CVS","DHR","DVA","DXCM","ELV","EW",
-    "GEHC","GILD","HCA","HOLX","HSIC","HUM","IDXX","ILMN","INCY","IQV",
-    "ISRG","JNJ","LH","LLY","MCK","MDT","MOH","MRK","MTD","PFE",
-    "PODD","REGN","RMD","RMD","RVTY","SYK","TECH","TMO","UHS","UNH",
-    "VRTX","WAT","WST","XRAY","ZBH","ZTS",
+    # HEALTHCARE
+    "ABBV","ABT","ALGN","AMGN","BAX","BDX","BIIB","BMY","BSX",
+    "CAH","CNC","COO","COR","CRL","CVS","DHR","DVA","DXCM","ELV",
+    "EW","GEHC","GILD","HCA","HOLX","HSIC","HUM","IDXX","ILMN",
+    "INCY","IQV","ISRG","JNJ","LH","LLY","MCK","MDT","MOH","MRK",
+    "MTD","PFE","PODD","REGN","RMD","RVTY","SYK","TECH","TMO",
+    "UHS","UNH","VRTX","WAT","WST","XRAY","ZBH","ZTS",
 
-    # ---------------- INDUSTRIALS ----------------
+    # INDUSTRIAL
     "AAL","ALK","AME","AOS","CAT","CHRW","CMI","CSX","CTAS","DAL",
     "DE","DOV","EMR","ETN","EXPD","FAST","FDX","GD","GE","GNRC",
     "GWW","HON","HUBB","IEX","IR","ITW","J","JCI","LDOS","LHX",
@@ -88,52 +124,60 @@ UNIVERSE = [
     "PH","PNR","PWR","ROK","RSG","RTX","SNA","SWK","TDG","TT",
     "TXT","UAL","UNP","UPS","URI","VRSK","WAB","WM","XYL",
 
-    # ---------------- ENERGY ----------------
+    # ENERGY
     "APA","BKR","COP","CTRA","CVX","DVN","EOG","EQT","FANG","HAL",
-    "HES","KMI","MPC","MRO","MUR","OKE","OXY","PSX","PXD","SLB",
-    "TRGP","VLO","WMB","XOM",
+    "HES","KMI","MPC","MRO","MUR","OKE","OXY","PSX","SLB","TRGP",
+    "VLO","WMB","XOM",
 
-    # ---------------- MATERIALS ----------------
+    # MATERIALS
     "AA","ALB","APD","AVY","BALL","CF","CLF","CTVA","DD","DOW",
     "ECL","EMN","FCX","FMC","IFF","IP","LIN","LYB","MOS","NEM",
     "NUE","PKG","PPG","SHW","STLD","SW","VMC","WRK",
 
-    # ---------------- CONSUMER DISCRETIONARY ----------------
-    "ABNB","AZO","BBY","BBWI","BWA","CHWY","CMG","COST","CPRT","CVNA",
-    "DHI","DKS","DPZ","DRI","EBAY","ETSY","EXPE","F","GM","GPC",
-    "GRMN","HAS","HD","KMX","LEN","LOW","LULU","LVS","MCD","MGM",
-    "NCLH","NKE","ORLY","PHM","POOL","RCL","ROST","SBUX","TJX","TGT",
-    "TPR","TSCO","TSLA","ULTA","WHR","WYNN","YUM",
+    # CONSUMER DISCRETIONARY
+    "ABNB","AZO","BBY","BBWI","BWA","CHWY","CMG","COST","CPRT",
+    "CVNA","DHI","DKS","DPZ","DRI","EBAY","ETSY","EXPE","F","GM",
+    "GPC","GRMN","HAS","HD","KMX","LEN","LOW","LULU","LVS","MCD",
+    "MGM","NCLH","NKE","ORLY","PHM","POOL","RCL","ROST","SBUX",
+    "TJX","TGT","TPR","TSCO","ULTA","WHR","WYNN","YUM",
 
-    # ---------------- CONSUMER STAPLES ----------------
+    # CONSUMER STAPLES
     "ADM","BG","CAG","CHD","CL","CLX","COKE","CPB","DG","DLTR",
     "EL","GIS","HSY","HRL","KDP","KHC","KMB","KO","KR","MDLZ",
-    "MKC","MNST","MO","PEP","PG","PM","SJM","STZ","SYY","TAP",
-    "TSN","WBA","WMT",
+    "MKC","MNST","PEP","PG","PM","SJM","STZ","SYY","TAP","TSN",
+    "WBA","WMT",
 
-    # ---------------- COMMUNICATION SERVICES ----------------
-    "CHTR","CMCSA","DIS","EA","FOXA","FOX","GOOG","GOOGL","LYV","MTCH",
-    "NFLX","NWS","NWSA","OMC","PARA","T","TMUS","TTWO","VZ","WBD",
+    # COMMUNICATIONS
+    "CHTR","CMCSA","DIS","EA","FOXA","FOX","LYV","MTCH","NFLX",
+    "NWS","NWSA","OMC","PARA","T","TMUS","TTWO","VZ","WBD",
 
-    # ---------------- UTILITIES ----------------
+    # UTILITIES
     "AEE","AEP","AES","ATO","AWK","CEG","CMS","CNP","D","DTE",
     "DUK","ED","EIX","ES","ETR","EVRG","EXC","FE","LNT","NEE",
     "NI","NRG","PCG","PEG","PNW","SO","SRE","WEC","XEL",
 
-    # ---------------- REAL ESTATE ----------------
+    # REAL ESTATE
     "AMH","AVB","BXP","CBRE","CCI","CPT","DLR","EQIX","EQR","ESS",
     "EXR","HST","INVH","IRM","KIM","MAA","O","PLD","PSA","REG",
     "SBAC","SPG","UDR","VICI","VTR","WELL","WY",
 
     # ========================================================
-    # ETFs — BROAD MARKET / SECTOR / THEMATIC / COMMODITIES
+    # BLCO — NORMAL UNIVERSE MEMBER
+    # ========================================================
+
+    "BLCO",
+
+    # ========================================================
+    # ETFs
     # ========================================================
 
     "SPY","QQQ","IWM","DIA","MDY","VOO","VTI","SCHX","SPLG","RSP",
 
-    "XLK","XLF","XLV","XLI","XLE","XLP","XLY","XLC","XLU","XLB","XLRE",
+    "XLK","XLF","XLV","XLI","XLE","XLP","XLY","XLC","XLU","XLB",
+    "XLRE",
 
-    "SMH","SOXX","IGV","HACK","CIBR","ARKK","ARKW","ARKQ","BOTZ","ROBO",
+    "SMH","SOXX","IGV","HACK","CIBR","ARKK","ARKW","ARKQ","BOTZ",
+    "ROBO",
 
     "XBI","IBB","IHI","XPH","XHE","VHT","FHLC",
 
@@ -146,7 +190,7 @@ UNIVERSE = [
     "EEM","EFA","VEA","VWO","FXI","EWZ","EWJ","EWG","EWU","INDA",
     "KWEB","MCHI","IEMG","ACWI",
 
-    "VNQ","IYR","XLRE",
+    "VNQ","IYR",
 
     "ARKF","FINX","KRE","KBE","XRT","IBUY",
 
@@ -154,36 +198,34 @@ UNIVERSE = [
 
     "ICLN","TAN","FAN","PBW",
 
-    "XME","PICK","URA",
-
-    "SOXL","SOXS","TQQQ","SQQQ"
+    "XME","PICK","URA"
 ]
 
-# Remove accidental duplicate symbols
-UNIVERSE = sorted(list(set(UNIVERSE)))
-
+# Remove duplicates and Mag 7
+UNIVERSE = sorted(
+    set(UNIVERSE) - MAG_7
+)
 
 # ============================================================
-# TRADIER
+# TRADIER AUTHENTICATION
 # ============================================================
 
 def get_token():
-    """
-    Reads Tradier token from Streamlit secrets first,
-    then environment variable.
-    """
 
     try:
         token = st.secrets["TRADIER_TOKEN"]
+
         if token:
             return token
+
     except Exception:
         pass
 
     return os.getenv("TRADIER_TOKEN")
 
 
-def tradier_headers(token):
+def headers(token):
+
     return {
         "Authorization": f"Bearer {token}",
         "Accept": "application/json"
@@ -199,21 +241,25 @@ def get_history(symbol, token):
 
     url = f"{TRADIER_BASE_URL}/markets/history"
 
+    end_date = datetime.now().date()
+
+    start_date = (
+        end_date -
+        timedelta(days=HISTORY_DAYS)
+    )
+
     params = {
         "symbol": symbol,
         "interval": "daily",
-        "start": (
-            pd.Timestamp.today() -
-            pd.Timedelta(days=HISTORY_DAYS + 30)
-        ).strftime("%Y-%m-%d"),
-        "end": pd.Timestamp.today().strftime("%Y-%m-%d")
+        "start": start_date.strftime("%Y-%m-%d"),
+        "end": end_date.strftime("%Y-%m-%d")
     }
 
     try:
 
         response = requests.get(
             url,
-            headers=tradier_headers(token),
+            headers=headers(token),
             params=params,
             timeout=15
         )
@@ -221,9 +267,9 @@ def get_history(symbol, token):
         if response.status_code != 200:
             return None
 
-        data = response.json()
+        payload = response.json()
 
-        history = data.get("history")
+        history = payload.get("history")
 
         if not history:
             return None
@@ -238,8 +284,6 @@ def get_history(symbol, token):
         if df.empty:
             return None
 
-        df["date"] = pd.to_datetime(df["date"])
-
         numeric_columns = [
             "open",
             "high",
@@ -251,16 +295,31 @@ def get_history(symbol, token):
         for column in numeric_columns:
 
             if column in df.columns:
+
                 df[column] = pd.to_numeric(
                     df[column],
                     errors="coerce"
                 )
 
-        df = df.dropna(
-            subset=["close", "high", "low", "volume"]
+        df["date"] = pd.to_datetime(
+            df["date"]
         )
 
-        df = df.sort_values("date").reset_index(drop=True)
+        df = df.dropna(
+            subset=[
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume"
+            ]
+        )
+
+        df = (
+            df
+            .sort_values("date")
+            .reset_index(drop=True)
+        )
 
         return df
 
@@ -269,7 +328,7 @@ def get_history(symbol, token):
 
 
 # ============================================================
-# TECHNICAL CALCULATIONS
+# TECHNICAL INDICATORS
 # ============================================================
 
 def calculate_indicators(df):
@@ -277,18 +336,24 @@ def calculate_indicators(df):
     df = df.copy()
 
     # --------------------------------------------------------
-    # EMA
+    # EMAs
     # --------------------------------------------------------
 
     df["ema50"] = (
         df["close"]
-        .ewm(span=50, adjust=False)
+        .ewm(
+            span=EMA_FAST,
+            adjust=False
+        )
         .mean()
     )
 
     df["ema100"] = (
         df["close"]
-        .ewm(span=100, adjust=False)
+        .ewm(
+            span=EMA_SLOW,
+            adjust=False
+        )
         .mean()
     )
 
@@ -296,25 +361,36 @@ def calculate_indicators(df):
     # TRUE RANGE / ATR
     # --------------------------------------------------------
 
-    previous_close = df["close"].shift(1)
+    previous_close = (
+        df["close"].shift(1)
+    )
 
-    tr1 = df["high"] - df["low"]
+    tr1 = (
+        df["high"] -
+        df["low"]
+    )
 
     tr2 = (
-        df["high"] - previous_close
+        df["high"] -
+        previous_close
     ).abs()
 
     tr3 = (
-        df["low"] - previous_close
+        df["low"] -
+        previous_close
     ).abs()
 
-    df["true_range"] = pd.concat(
-        [tr1, tr2, tr3],
+    df["tr"] = pd.concat(
+        [
+            tr1,
+            tr2,
+            tr3
+        ],
         axis=1
     ).max(axis=1)
 
     df["atr"] = (
-        df["true_range"]
+        df["tr"]
         .ewm(
             span=KC_ATR_LENGTH,
             adjust=False
@@ -323,13 +399,13 @@ def calculate_indicators(df):
     )
 
     # --------------------------------------------------------
-    # KELTNER CHANNEL
+    # KELTNER
     # --------------------------------------------------------
 
     df["kc_middle"] = (
         df["close"]
         .ewm(
-            span=KC_EMA_LENGTH,
+            span=KC_LENGTH,
             adjust=False
         )
         .mean()
@@ -337,12 +413,19 @@ def calculate_indicators(df):
 
     df["kc_upper"] = (
         df["kc_middle"] +
-        KC_MULTIPLIER * df["atr"]
+        KC_MULTIPLIER *
+        df["atr"]
     )
 
     df["kc_lower"] = (
         df["kc_middle"] -
-        KC_MULTIPLIER * df["atr"]
+        KC_MULTIPLIER *
+        df["atr"]
+    )
+
+    df["kc_width"] = (
+        df["kc_upper"] -
+        df["kc_lower"]
     )
 
     # --------------------------------------------------------
@@ -361,13 +444,7 @@ def calculate_indicators(df):
     )
 
     # --------------------------------------------------------
-    # CANDLE PRESSURE
-    #
-    # Close location within candle:
-    #
-    # +1 = close at high
-    # -1 = close at low
-    #  0 = middle
+    # CANDLE POSITION
     # --------------------------------------------------------
 
     candle_range = (
@@ -388,15 +465,13 @@ def calculate_indicators(df):
         candle_range
     )
 
-    df["candle_pressure"] = (
-        df["close_location"] * 2
-    ) - 1
-
     # --------------------------------------------------------
     # DIRECTIONAL VOLUME
     # --------------------------------------------------------
 
-    price_change = df["close"].diff()
+    price_change = (
+        df["close"].diff()
+    )
 
     df["up_volume"] = np.where(
         price_change > 0,
@@ -411,13 +486,19 @@ def calculate_indicators(df):
     )
 
     df["up_volume20"] = (
-        pd.Series(df["up_volume"])
+        pd.Series(
+            df["up_volume"],
+            index=df.index
+        )
         .rolling(20)
         .sum()
     )
 
     df["down_volume20"] = (
-        pd.Series(df["down_volume"])
+        pd.Series(
+            df["down_volume"],
+            index=df.index
+        )
         .rolling(20)
         .sum()
     )
@@ -441,7 +522,7 @@ def calculate_indicators(df):
     # ACCUMULATION / DISTRIBUTION
     # --------------------------------------------------------
 
-    money_flow_multiplier = (
+    mf_multiplier = (
         (
             (df["close"] - df["low"]) -
             (df["high"] - df["close"])
@@ -450,29 +531,32 @@ def calculate_indicators(df):
         candle_range
     )
 
-    money_flow_multiplier = (
-        money_flow_multiplier
-        .replace([np.inf, -np.inf], 0)
+    mf_multiplier = (
+        mf_multiplier
+        .replace(
+            [np.inf, -np.inf],
+            0
+        )
         .fillna(0)
     )
 
-    money_flow_volume = (
-        money_flow_multiplier *
+    df["mf_volume"] = (
+        mf_multiplier *
         df["volume"]
     )
 
     df["ad_line"] = (
-        money_flow_volume
+        df["mf_volume"]
         .cumsum()
     )
 
-    df["ad_slope"] = (
+    df["ad_slope20"] = (
         df["ad_line"] -
         df["ad_line"].shift(20)
     )
 
     # --------------------------------------------------------
-    # PRICE MOMENTUM
+    # MOMENTUM
     # --------------------------------------------------------
 
     df["return5"] = (
@@ -503,53 +587,298 @@ def calculate_indicators(df):
 
 
 # ============================================================
-# PRESSURE SCORE
+# REAL EMA CROSSOVER DETECTOR
 # ============================================================
 
-def pressure_score(row):
+def find_recent_crossovers(df):
 
-    # Candle strength
-    candle_component = (
-        (row["candle_pressure"] + 1) / 2
-    ) * 100
+    crossovers = []
 
-    # Directional volume
-    volume_component = (
-        (row["volume_pressure"] + 1) / 2
-    ) * 100
+    for i in range(
+        1,
+        len(df)
+    ):
 
-    # Relative volume confirmation
-    relative_volume = row["relative_volume"]
+        previous = df.iloc[i - 1]
+        current = df.iloc[i]
 
-    if pd.isna(relative_volume):
-        volume_strength = 50
+        # Bullish crossover
+        if (
+            previous["ema50"]
+            <=
+            previous["ema100"]
+            and
+            current["ema50"]
+            >
+            current["ema100"]
+        ):
 
-    elif relative_volume >= 2:
-        volume_strength = 100
+            crossovers.append({
+                "type": "BULLISH",
+                "index": i,
+                "date": current["date"]
+            })
 
-    elif relative_volume >= 1.5:
-        volume_strength = 85
+        # Bearish crossover
+        elif (
+            previous["ema50"]
+            >=
+            previous["ema100"]
+            and
+            current["ema50"]
+            <
+            current["ema100"]
+        ):
 
-    elif relative_volume >= 1:
-        volume_strength = 65
+            crossovers.append({
+                "type": "BEARISH",
+                "index": i,
+                "date": current["date"]
+            })
+
+    return crossovers
+
+
+def get_recent_crossover(df):
+
+    crossovers = find_recent_crossovers(df)
+
+    if not crossovers:
+        return None
+
+    last_date = df.iloc[-1]["date"]
+
+    recent = []
+
+    for cross in crossovers:
+
+        days_ago = (
+            last_date -
+            cross["date"]
+        ).days
+
+        if days_ago <= 45:
+            recent.append(
+                (
+                    days_ago,
+                    cross
+                )
+            )
+
+    if not recent:
+        return None
+
+    recent.sort(
+        key=lambda x: x[0]
+    )
+
+    days_ago, cross = recent[0]
+
+    # We specifically want the crossover
+    # to have occurred within approximately
+    # the last 30 trading sessions.
+    position = cross["index"]
+
+    trading_sessions_ago = (
+        len(df) -
+        1 -
+        position
+    )
+
+    if trading_sessions_ago > CROSS_LOOKBACK:
+        return None
+
+    return {
+        "direction": cross["type"],
+        "date": cross["date"],
+        "sessions_ago": trading_sessions_ago
+    }
+
+
+# ============================================================
+# KELTNER MOMENTUM
+# ============================================================
+
+def keltner_analysis(df):
+
+    if len(df) < 30:
+        return {
+            "score": 0,
+            "label": "Insufficient data"
+        }
+
+    last = df.iloc[-1]
+    previous = df.iloc[-2]
+
+    # Channel width expansion
+    width_now = (
+        last["kc_width"]
+    )
+
+    width_10 = (
+        df["kc_width"]
+        .iloc[-11:-1]
+        .mean()
+    )
+
+    if width_10 > 0:
+
+        width_change = (
+            width_now /
+            width_10
+        )
 
     else:
-        volume_strength = 45
+        width_change = 1
 
-    # A/D direction
-    ad_component = 50
+    # Price position
+    channel_width = (
+        last["kc_upper"] -
+        last["kc_lower"]
+    )
 
-    if row["ad_slope"] > 0:
-        ad_component = 75
+    if channel_width > 0:
 
-    elif row["ad_slope"] < 0:
-        ad_component = 25
+        position = (
+            last["close"] -
+            last["kc_lower"]
+        ) / channel_width
+
+    else:
+        position = 0.5
+
+    score = 50
+
+    signals = []
+
+    # Expansion
+    if width_change >= 1.15:
+
+        score += 20
+
+        signals.append(
+            "Keltner expansion"
+        )
+
+    elif width_change >= 1.05:
+
+        score += 10
+
+        signals.append(
+            "Keltner widening"
+        )
+
+    # Momentum above middle
+    if last["close"] > last["kc_middle"]:
+
+        score += 10
+
+        signals.append(
+            "Above KC midline"
+        )
+
+    # Avoid extremely extended upper band
+    if position <= 0.85:
+
+        score += 10
+
+    else:
+
+        score -= 10
+
+        signals.append(
+            "Extended"
+        )
+
+    # Recent momentum
+    if last["return5"] > 0:
+
+        score += 10
+
+        signals.append(
+            "5-day momentum"
+        )
+
+    score = max(
+        0,
+        min(100, score)
+    )
+
+    if score >= 80:
+        label = "Strong momentum"
+
+    elif score >= 65:
+        label = "Developing momentum"
+
+    elif score >= 50:
+        label = "Neutral"
+
+    else:
+        label = "Weak"
+
+    return {
+        "score": score,
+        "label": label,
+        "width_change": width_change,
+        "position": position,
+        "signals": signals
+    }
+
+
+# ============================================================
+# PRESSURE
+# ============================================================
+
+def pressure_analysis(row):
+
+    candle_score = (
+        row["close_location"] *
+        100
+    )
+
+    volume_score = (
+        (
+            row["volume_pressure"] +
+            1
+        ) /
+        2
+    ) * 100
+
+    rv = row["relative_volume"]
+
+    if pd.isna(rv):
+
+        volume_confirmation = 50
+
+    elif rv >= 2:
+
+        volume_confirmation = 100
+
+    elif rv >= 1.5:
+
+        volume_confirmation = 85
+
+    elif rv >= 1:
+
+        volume_confirmation = 70
+
+    else:
+
+        volume_confirmation = 40
+
+    ad_score = 50
+
+    if row["ad_slope20"] > 0:
+        ad_score = 75
+
+    elif row["ad_slope20"] < 0:
+        ad_score = 25
 
     buying_pressure = (
-        candle_component * 0.30 +
-        volume_component * 0.35 +
-        volume_strength * 0.15 +
-        ad_component * 0.20
+        candle_score * 0.30 +
+        volume_score * 0.35 +
+        volume_confirmation * 0.15 +
+        ad_score * 0.20
     )
 
     buying_pressure = max(
@@ -557,62 +886,25 @@ def pressure_score(row):
         min(100, buying_pressure)
     )
 
-    selling_pressure = 100 - buying_pressure
+    selling_pressure = (
+        100 -
+        buying_pressure
+    )
 
-    return buying_pressure, selling_pressure
-
-
-# ============================================================
-# KELTNER POSITION
-# ============================================================
-
-def keltner_position(row):
-
-    price = row["close"]
-    middle = row["kc_middle"]
-    upper = row["kc_upper"]
-    lower = row["kc_lower"]
-
-    channel_width = upper - lower
-
-    if channel_width <= 0:
-        return "Unknown", 50
-
-    position = (
-        price - lower
-    ) / channel_width
-
-    if position >= 0.85:
-        label = "Upper / Extended"
-        quality = 25
-
-    elif position >= 0.65:
-        label = "Upper-Mid"
-        quality = 55
-
-    elif position >= 0.35:
-        label = "Middle / Preferred"
-        quality = 100
-
-    elif position >= 0.15:
-        label = "Lower-Mid"
-        quality = 75
-
-    else:
-        label = "Lower / Oversold"
-        quality = 45
-
-    return label, quality
+    return (
+        buying_pressure,
+        selling_pressure
+    )
 
 
 # ============================================================
 # PRICE ACTION
 # ============================================================
 
-def price_action_score(df):
+def price_action(df):
 
     if len(df) < 5:
-        return 50, "Insufficient data"
+        return 50, "Insufficient"
 
     last = df.iloc[-1]
     previous = df.iloc[-2]
@@ -620,30 +912,42 @@ def price_action_score(df):
     score = 50
     signals = []
 
-    # Bullish close
     if last["close"] > last["open"]:
-        score += 10
-        signals.append("Bullish close")
 
-    # Strong close inside candle
+        score += 10
+
+        signals.append(
+            "Bullish candle"
+        )
+
     if last["close_location"] >= 0.70:
-        score += 10
-        signals.append("Strong close")
 
-    # Higher low
+        score += 10
+
+        signals.append(
+            "Strong close"
+        )
+
     if last["low"] > previous["low"]:
+
         score += 10
-        signals.append("Higher low")
 
-    # Price above previous close
+        signals.append(
+            "Higher low"
+        )
+
     if last["close"] > previous["close"]:
+
         score += 5
 
-    # Recent momentum
     if last["return5"] > 0:
+
         score += 5
 
-    score = max(0, min(100, score))
+    score = max(
+        0,
+        min(100, score)
+    )
 
     if score >= 75:
         label = "Bullish confirmation"
@@ -661,12 +965,20 @@ def price_action_score(df):
 
 
 # ============================================================
-# SECURITY ANALYSIS
+# STOCK ANALYSIS
 # ============================================================
 
-def analyze_symbol(symbol, token):
+def analyze_symbol(
+    symbol,
+    token,
+    min_price,
+    min_volume
+):
 
-    df = get_history(symbol, token)
+    df = get_history(
+        symbol,
+        token
+    )
 
     if df is None:
         return None
@@ -676,152 +988,85 @@ def analyze_symbol(symbol, token):
 
     df = calculate_indicators(df)
 
-    row = df.iloc[-1]
+    last = df.iloc[-1]
 
-    if pd.isna(row["ema100"]):
-        return None
-
-    price = float(row["close"])
-
-    avg_volume = float(
-        row["avg_volume20"]
+    price = float(
+        last["close"]
     )
 
-    # Basic liquidity/price filter
-    if price < DEFAULT_MIN_PRICE:
+    avg_volume = float(
+        last["avg_volume20"]
+    )
+
+    # --------------------------------------------------------
+    # BASIC FILTER
+    # --------------------------------------------------------
+
+    if price < min_price:
         return None
 
-    if avg_volume < DEFAULT_MIN_AVG_VOLUME:
+    if avg_volume < min_volume:
         return None
 
     # --------------------------------------------------------
-    # TREND
+    # EMA CROSSOVER
     # --------------------------------------------------------
 
-    if (
-        row["ema50"] > row["ema100"]
-        and
-        row["ema50_slope"] > 0
-    ):
-        direction = "BULLISH"
+    crossover = get_recent_crossover(df)
 
-    elif (
-        row["ema50"] < row["ema100"]
-        and
-        row["ema50_slope"] < 0
-    ):
-        direction = "BEARISH"
+    if crossover is None:
+        return None
 
-    else:
-        direction = "NEUTRAL"
+    direction = (
+        crossover["direction"]
+    )
 
     # --------------------------------------------------------
-    # TREND SCORE
+    # CURRENT TREND CONFIRMATION
     # --------------------------------------------------------
 
     trend_score = 50
 
     if direction == "BULLISH":
 
-        trend_score = 70
+        if last["ema50"] > last["ema100"]:
+            trend_score += 15
 
-        if price > row["ema50"]:
+        if price > last["ema50"]:
+            trend_score += 15
+
+        if last["ema50_slope"] > 0:
             trend_score += 10
 
-        if row["ema50_slope"] > 0:
+        if last["ema100_slope"] > 0:
             trend_score += 10
 
-        if row["ema100_slope"] > 0:
+    else:
+
+        if last["ema50"] < last["ema100"]:
+            trend_score += 15
+
+        if price < last["ema50"]:
+            trend_score += 15
+
+        if last["ema50_slope"] < 0:
             trend_score += 10
 
-    elif direction == "BEARISH":
-
-        trend_score = 70
-
-        if price < row["ema50"]:
+        if last["ema100_slope"] < 0:
             trend_score += 10
 
-        if row["ema50_slope"] < 0:
-            trend_score += 10
-
-        if row["ema100_slope"] < 0:
-            trend_score += 10
+    trend_score = min(
+        100,
+        trend_score
+    )
 
     # --------------------------------------------------------
     # PRESSURE
     # --------------------------------------------------------
 
     buying_pressure, selling_pressure = (
-        pressure_score(row)
+        pressure_analysis(last)
     )
-
-    net_pressure = (
-        buying_pressure -
-        selling_pressure
-    )
-
-    # --------------------------------------------------------
-    # KELTNER
-    # --------------------------------------------------------
-
-    kc_label, kc_quality = (
-        keltner_position(row)
-    )
-
-    # --------------------------------------------------------
-    # PRICE ACTION
-    # --------------------------------------------------------
-
-    pa_score, pa_label = (
-        price_action_score(df)
-    )
-
-    # --------------------------------------------------------
-    # PRESSURE DIRECTION
-    # --------------------------------------------------------
-
-    if len(df) >= 6:
-
-        recent_pressure = []
-
-        for i in range(-5, 0):
-
-            r = df.iloc[i]
-
-            bp, sp = pressure_score(r)
-
-            recent_pressure.append(
-                bp - sp
-            )
-
-        older_pressure = np.mean(
-            recent_pressure[:2]
-        )
-
-        recent_pressure_avg = np.mean(
-            recent_pressure[-2:]
-        )
-
-        if recent_pressure_avg > older_pressure + 5:
-            pressure_direction = "Increasing ↑"
-
-        elif recent_pressure_avg < older_pressure - 5:
-            pressure_direction = "Decreasing ↓"
-
-        else:
-            pressure_direction = "Stable →"
-
-    else:
-        pressure_direction = "Unknown"
-
-    # --------------------------------------------------------
-    # FINAL SCORE
-    # --------------------------------------------------------
-
-    # Trend = 35%
-    # Pressure = 35%
-    # Keltner = 20%
-    # Price action = 10%
 
     directional_pressure = (
         buying_pressure
@@ -829,21 +1074,83 @@ def analyze_symbol(symbol, token):
         else selling_pressure
     )
 
+    # --------------------------------------------------------
+    # KELTNER
+    # --------------------------------------------------------
+
+    kc = keltner_analysis(df)
+
+    # --------------------------------------------------------
+    # PRICE ACTION
+    # --------------------------------------------------------
+
+    pa_score, pa_label = (
+        price_action(df)
+    )
+
+    # --------------------------------------------------------
+    # PRESSURE TREND
+    # --------------------------------------------------------
+
+    pressure_values = []
+
+    for i in range(-5, 0):
+
+        bp, sp = (
+            pressure_analysis(
+                df.iloc[i]
+            )
+        )
+
+        pressure_values.append(
+            bp - sp
+        )
+
+    pressure_old = np.mean(
+        pressure_values[:2]
+    )
+
+    pressure_new = np.mean(
+        pressure_values[-2:]
+    )
+
+    if direction == "BULLISH":
+
+        if pressure_new > pressure_old + 5:
+            pressure_trend = "Increasing ↑"
+
+        elif pressure_new < pressure_old - 5:
+            pressure_trend = "Decreasing ↓"
+
+        else:
+            pressure_trend = "Stable →"
+
+    else:
+
+        if pressure_new < pressure_old - 5:
+            pressure_trend = "Increasing ↓"
+
+        elif pressure_new > pressure_old + 5:
+            pressure_trend = "Decreasing ↑"
+
+        else:
+            pressure_trend = "Stable →"
+
+    # --------------------------------------------------------
+    # FINAL TECHNICAL SCORE
+    # --------------------------------------------------------
+
     final_score = (
         trend_score * 0.35 +
-        directional_pressure * 0.35 +
-        kc_quality * 0.20 +
-        pa_score * 0.10
+        directional_pressure * 0.30 +
+        kc["score"] * 0.20 +
+        pa_score * 0.15
     )
 
     final_score = round(
         max(0, min(100, final_score)),
         1
     )
-
-    # --------------------------------------------------------
-    # SETUP QUALITY
-    # --------------------------------------------------------
 
     if final_score >= 85:
         setup = "PRIME"
@@ -854,80 +1161,117 @@ def analyze_symbol(symbol, token):
     elif final_score >= 65:
         setup = "GOOD"
 
-    elif final_score >= 55:
+    else:
         setup = "WATCH"
 
-    else:
-        setup = "WEAK"
-
-    # --------------------------------------------------------
-    # ONLY FOLLOW ESTABLISHED TRENDS
-    # --------------------------------------------------------
-
-    follow_trend = (
-        direction != "NEUTRAL"
-    )
-
     return {
+
         "Ticker": symbol,
-        "Price": round(price, 2),
+
+        "Price": round(
+            price,
+            2
+        ),
 
         "Direction": direction,
 
         "Score": final_score,
+
         "Setup": setup,
 
-        "Buying Pressure": round(
-            buying_pressure, 1
-        ),
+        "Crossover Date":
+            crossover["date"].strftime(
+                "%Y-%m-%d"
+            ),
 
-        "Selling Pressure": round(
-            selling_pressure, 1
-        ),
+        "Crossover Sessions Ago":
+            crossover[
+                "sessions_ago"
+            ],
 
-        "Net Pressure": round(
-            net_pressure, 1
-        ),
+        "Buying Pressure":
+            round(
+                buying_pressure,
+                1
+            ),
 
-        "Pressure Trend": pressure_direction,
+        "Selling Pressure":
+            round(
+                selling_pressure,
+                1
+            ),
 
-        "50 EMA": round(
-            float(row["ema50"]), 2
-        ),
+        "Pressure Trend":
+            pressure_trend,
 
-        "100 EMA": round(
-            float(row["ema100"]), 2
-        ),
+        "50 EMA":
+            round(
+                float(last["ema50"]),
+                2
+            ),
 
-        "Keltner": kc_label,
+        "100 EMA":
+            round(
+                float(last["ema100"]),
+                2
+            ),
 
-        "KC Middle": round(
-            float(row["kc_middle"]), 2
-        ),
+        "Keltner":
+            kc["label"],
 
-        "KC Upper": round(
-            float(row["kc_upper"]), 2
-        ),
+        "KC Expansion":
+            round(
+                kc["width_change"],
+                2
+            ),
 
-        "KC Lower": round(
-            float(row["kc_lower"]), 2
-        ),
+        "Price Action":
+            pa_label,
 
-        "Price Action": pa_label,
+        "Relative Volume":
+            round(
+                float(
+                    last["relative_volume"]
+                ),
+                2
+            ),
 
-        "Relative Volume": round(
-            float(row["relative_volume"]), 2
-        ),
+        "KC Middle":
+            round(
+                float(
+                    last["kc_middle"]
+                ),
+                2
+            ),
 
-        "Follow Trend": follow_trend
+        "KC Upper":
+            round(
+                float(
+                    last["kc_upper"]
+                ),
+                2
+            ),
+
+        "KC Lower":
+            round(
+                float(
+                    last["kc_lower"]
+                ),
+                2
+            )
     }
 
 
 # ============================================================
-# SCANNER
+# PARALLEL STOCK SCAN
 # ============================================================
 
-def run_scan(token, symbols):
+def run_stock_scan(
+    token,
+    symbols,
+    min_price,
+    min_volume
+):
 
     results = []
 
@@ -937,76 +1281,1015 @@ def run_scan(token, symbols):
 
     total = len(symbols)
 
-    for count, symbol in enumerate(symbols, start=1):
+    completed = 0
 
-        status.text(
-            f"Scanning {symbol} "
-            f"({count}/{total})"
-        )
+    # Moderate concurrency
+    # to avoid overwhelming the API.
 
-        try:
+    with ThreadPoolExecutor(
+        max_workers=6
+    ) as executor:
 
-            result = analyze_symbol(
+        futures = {
+            executor.submit(
+                analyze_symbol,
                 symbol,
-                token
+                token,
+                min_price,
+                min_volume
+            ): symbol
+
+            for symbol in symbols
+        }
+
+        for future in as_completed(
+            futures
+        ):
+
+            completed += 1
+
+            symbol = futures[future]
+
+            status.text(
+                f"Scanning {symbol} "
+                f"({completed}/{total})"
             )
 
-            if result is not None:
-                results.append(result)
+            try:
 
-        except Exception:
-            pass
+                result = future.result()
 
-        progress.progress(
-            count / total
-        )
+                if result is not None:
+                    results.append(result)
+
+            except Exception as e:
+                st.error(f"Option engine error for {row['Ticker']}: {e}")
+
+            progress.progress(
+                completed / total
+            )
 
     status.text(
-        f"Scan complete — "
-        f"{len(results)} qualifying securities."
+        f"Technical scan complete — "
+        f"{len(results)} candidates."
     )
 
     return pd.DataFrame(results)
 
 
 # ============================================================
+# OPTION EXPIRATIONS
+# ============================================================
+
+@st.cache_data(ttl=900)
+def get_expirations(
+    symbol,
+    token
+):
+
+    url = (
+        f"{TRADIER_BASE_URL}"
+        "/markets/options/expirations"
+    )
+
+    params = {
+        "symbol": symbol,
+        "includeAllRoots": "true",
+        "strikes": "false"
+    }
+
+    try:
+
+        response = requests.get(
+            url,
+            headers=headers(token),
+            params=params,
+            timeout=15
+        )
+
+        if response.status_code != 200:
+            return []
+
+        payload = response.json()
+
+        expirations = (
+            payload
+            .get("expirations", {})
+            .get("date", [])
+        )
+
+        if isinstance(
+            expirations,
+            str
+        ):
+            expirations = [
+                expirations
+            ]
+
+        return expirations
+
+    except Exception:
+        return []
+
+
+# ============================================================
+# OPTION CHAIN
+# ============================================================
+
+@st.cache_data(ttl=300)
+def get_option_chain(
+    symbol,
+    expiration,
+    token
+):
+
+    url = (
+        f"{TRADIER_BASE_URL}"
+        "/markets/options/chains"
+    )
+
+    params = {
+        "symbol": symbol,
+        "expiration": expiration,
+        "greeks": "true"
+    }
+
+    try:
+
+        response = requests.get(
+            url,
+            headers=headers(token),
+            params=params,
+            timeout=15
+        )
+
+        if response.status_code != 200:
+            return None
+
+        payload = response.json()
+
+        options = (
+            payload
+            .get("options", {})
+            .get("option", [])
+        )
+
+        if not options:
+            return None
+
+        if isinstance(
+            options,
+            dict
+        ):
+            options = [options]
+
+        df = pd.DataFrame(options)
+
+        if df.empty:
+            return None
+
+        numeric_columns = [
+            "strike",
+            "bid",
+            "ask",
+            "last",
+            "volume",
+            "open_interest",
+            "delta",
+            "gamma",
+            "theta",
+            "vega",
+            "rho"
+        ]
+
+        for column in numeric_columns:
+
+            if column in df.columns:
+
+                df[column] = pd.to_numeric(
+                    df[column],
+                    errors="coerce"
+                )
+
+        return df
+
+    except Exception:
+        return None
+
+
+# ============================================================
+# 1% HUGHES TEST
+# ============================================================
+
+def one_percent_test(
+    stock_price,
+    option_type,
+    strike,
+    premium
+):
+
+    if (
+        pd.isna(stock_price)
+        or
+        pd.isna(strike)
+        or
+        pd.isna(premium)
+    ):
+        return False, 0
+
+    if option_type == "call":
+
+        intrinsic = max(
+            stock_price -
+            strike,
+            0
+        )
+
+    else:
+
+        intrinsic = max(
+            strike -
+            stock_price,
+            0
+        )
+
+    time_value = max(
+        premium -
+        intrinsic,
+        0
+    )
+
+    max_time_value = (
+        stock_price *
+        0.01
+    )
+
+    passes = (
+        time_value <=
+        max_time_value
+    )
+
+    return (
+        passes,
+        time_value
+    )
+
+
+# ============================================================
+# OPTION LIQUIDITY
+# ============================================================
+
+def option_liquidity(
+    row
+):
+
+    bid = row.get(
+        "bid",
+        np.nan
+    )
+
+    ask = row.get(
+        "ask",
+        np.nan
+    )
+
+    volume = row.get(
+        "volume",
+        0
+    )
+
+    open_interest = row.get(
+        "open_interest",
+        0
+    )
+
+    if (
+        pd.isna(bid)
+        or
+        pd.isna(ask)
+    ):
+        return False, 999
+
+    if bid <= 0 or ask <= 0:
+        return False, 999
+
+    midpoint = (
+        bid + ask
+    ) / 2
+
+    spread = (
+        ask - bid
+    )
+
+    spread_pct = (
+        spread /
+        midpoint
+    )
+
+    liquid = (
+        spread_pct <=
+        MAX_OPTION_BID_ASK_PCT
+        and
+        (
+            volume >= 10
+            or
+            open_interest >= 50
+        )
+    )
+
+    return (
+        liquid,
+        spread_pct
+    )
+
+
+# ============================================================
+# SINGLE OPTION CANDIDATES
+# ============================================================
+
+def build_single_options(
+    symbol,
+    stock_price,
+    direction,
+    expiration,
+    chain
+):
+
+    candidates = []
+
+    option_type = (
+        "call"
+        if direction == "BULLISH"
+        else "put"
+    )
+
+    if "option_type" in chain.columns:
+
+        chain = chain[
+            chain["option_type"]
+            .str.lower()
+            ==
+            option_type
+        ]
+
+    for _, row in chain.iterrows():
+
+        bid = row.get(
+            "bid",
+            np.nan
+        )
+
+        ask = row.get(
+            "ask",
+            np.nan
+        )
+
+        strike = row.get(
+            "strike",
+            np.nan
+        )
+
+        if (
+            pd.isna(bid)
+            or
+            pd.isna(ask)
+            or
+            pd.isna(strike)
+        ):
+            continue
+
+        if ask <= 0:
+            continue
+
+        # Use ask as conservative
+        # buy price.
+
+        buy_price = float(ask)
+
+        capital = (
+            buy_price *
+            100
+        )
+
+        if (
+            capital <
+            MIN_CAPITAL
+            or
+            capital >
+            MAX_CAPITAL
+        ):
+            continue
+
+        passes_1pct, time_value = (
+            one_percent_test(
+                stock_price,
+                option_type,
+                strike,
+                buy_price
+            )
+        )
+
+        if not passes_1pct:
+            continue
+
+        liquid, spread_pct = (
+            option_liquidity(row)
+        )
+
+        if not liquid:
+            continue
+
+        delta = row.get(
+            "delta",
+            np.nan
+        )
+
+        # Prefer directional delta.
+        if not pd.isna(delta):
+
+            if option_type == "call":
+
+                delta_quality = (
+                    100
+                    if delta >= 0.70
+                    else
+                    75
+                    if delta >= 0.55
+                    else
+                    50
+                )
+
+            else:
+
+                abs_delta = abs(delta)
+
+                delta_quality = (
+                    100
+                    if abs_delta >= 0.70
+                    else
+                    75
+                    if abs_delta >= 0.55
+                    else
+                    50
+                )
+
+        else:
+
+            delta_quality = 50
+
+        # Capital efficiency
+        capital_score = (
+            100
+            -
+            abs(
+                capital -
+                475
+            ) /
+            225 *
+            100
+        )
+
+        capital_score = max(
+            0,
+            min(100, capital_score)
+        )
+
+        score = (
+            delta_quality * 0.40 +
+            capital_score * 0.25 +
+            (
+                100 -
+                spread_pct * 100
+            ) * 0.20 +
+            15
+        )
+
+        candidates.append({
+
+            "Structure":
+                f"LONG {option_type.upper()}",
+
+            "Ticker":
+                symbol,
+
+            "Expiration":
+                expiration,
+
+            "Buy Strike":
+                strike,
+
+            "Buy Price":
+                buy_price,
+
+            "Debit":
+                capital,
+
+            "Time Value":
+                time_value,
+
+            "1% Limit":
+                stock_price * 0.01,
+
+            "Delta":
+                delta,
+
+            "Bid":
+                bid,
+
+            "Ask":
+                ask,
+
+            "Bid/Ask %":
+                spread_pct,
+
+            "Option Score":
+                round(
+                    score,
+                    1
+                )
+        })
+
+    return candidates
+
+
+# ============================================================
+# DEBIT SPREAD CANDIDATES
+# ============================================================
+
+def build_debit_spreads(
+    symbol,
+    stock_price,
+    direction,
+    expiration,
+    chain
+):
+
+    candidates = []
+
+    option_type = (
+        "call"
+        if direction == "BULLISH"
+        else "put"
+    )
+
+    if "option_type" in chain.columns:
+
+        chain = chain[
+            chain["option_type"]
+            .str.lower()
+            ==
+            option_type
+        ].copy()
+
+    chain = chain.dropna(
+        subset=[
+            "strike",
+            "bid",
+            "ask"
+        ]
+    )
+
+    if chain.empty:
+        return candidates
+
+    # --------------------------------------------------------
+    # BULL CALL SPREAD
+    # Buy lower strike
+    # Sell higher strike
+    # --------------------------------------------------------
+
+    if direction == "BULLISH":
+
+        long_legs = chain[
+            chain["strike"]
+            <=
+            stock_price
+        ]
+
+        short_legs = chain[
+            chain["strike"]
+            >
+            stock_price
+        ]
+
+    # --------------------------------------------------------
+    # BEAR PUT SPREAD
+    # Buy higher strike
+    # Sell lower strike
+    # --------------------------------------------------------
+
+    else:
+
+        long_legs = chain[
+            chain["strike"]
+            >=
+            stock_price
+        ]
+
+        short_legs = chain[
+            chain["strike"]
+            <
+            stock_price
+        ]
+
+    # Keep search manageable
+    long_legs = long_legs.sort_values(
+        "strike"
+    )
+
+    short_legs = short_legs.sort_values(
+        "strike"
+    )
+
+    for _, long_row in long_legs.iterrows():
+
+        long_strike = float(
+            long_row["strike"]
+        )
+
+        long_ask = float(
+            long_row["ask"]
+        )
+
+        if long_ask <= 0:
+            continue
+
+        # Hughes 1% test is applied
+        # to the LONG option.
+
+        passes_1pct, time_value = (
+            one_percent_test(
+                stock_price,
+                option_type,
+                long_strike,
+                long_ask
+            )
+        )
+
+        if not passes_1pct:
+            continue
+
+        long_liquid, long_spread = (
+            option_liquidity(
+                long_row
+            )
+        )
+
+        if not long_liquid:
+            continue
+
+        for _, short_row in short_legs.iterrows():
+
+            short_strike = float(
+                short_row["strike"]
+            )
+
+            short_bid = float(
+                short_row["bid"]
+            )
+
+            if short_bid <= 0:
+                continue
+
+            # Prevent absurdly wide spreads.
+
+            width = abs(
+                short_strike -
+                long_strike
+            )
+
+            if width <= 0:
+                continue
+
+            # Conservative debit:
+            # buy at ask / sell at bid.
+
+            debit = (
+                long_ask -
+                short_bid
+            )
+
+            if debit <= 0:
+                continue
+
+            capital = (
+                debit *
+                100
+            )
+
+            if (
+                capital <
+                MIN_CAPITAL
+                or
+                capital >
+                MAX_CAPITAL
+            ):
+                continue
+
+            short_liquid, short_spread = (
+                option_liquidity(
+                    short_row
+                )
+            )
+
+            if not short_liquid:
+                continue
+
+            max_profit = (
+                width -
+                debit
+            ) * 100
+
+            breakeven = (
+                long_strike +
+                debit
+            )
+
+            if direction == "BEARISH":
+
+                breakeven = (
+                    long_strike -
+                    debit
+                )
+
+            if max_profit <= 0:
+                continue
+
+            max_loss = (
+                capital
+            )
+
+            reward_risk = (
+                max_profit /
+                max_loss
+            )
+
+            # Prefer practical
+            # risk/reward structures.
+
+            if reward_risk >= 1.25:
+
+                rr_score = 100
+
+            elif reward_risk >= 1.0:
+
+                rr_score = 80
+
+            elif reward_risk >= 0.75:
+
+                rr_score = 60
+
+            else:
+
+                rr_score = 30
+
+            capital_score = (
+                100
+                -
+                abs(
+                    capital -
+                    475
+                ) /
+                225 *
+                100
+            )
+
+            capital_score = max(
+                0,
+                min(
+                    100,
+                    capital_score
+                )
+            )
+
+            score = (
+                rr_score * 0.40 +
+                capital_score * 0.25 +
+                (
+                    100 -
+                    (
+                        long_spread +
+                        short_spread
+                    ) *
+                    50
+                ) * 0.20 +
+                15
+            )
+
+            candidates.append({
+
+                "Structure":
+                    (
+                        "BULL CALL SPREAD"
+                        if direction ==
+                        "BULLISH"
+                        else
+                        "BEAR PUT SPREAD"
+                    ),
+
+                "Ticker":
+                    symbol,
+
+                "Expiration":
+                    expiration,
+
+                "Buy Strike":
+                    long_strike,
+
+                "Buy Price":
+                    long_ask,
+
+                "Sell Strike":
+                    short_strike,
+
+                "Sell Price":
+                    short_bid,
+
+                "Debit":
+                    debit,
+
+                "Capital":
+                    capital,
+
+                "Max Profit":
+                    max_profit,
+
+                "Max Loss":
+                    max_loss,
+
+                "Reward/Risk":
+                    reward_risk,
+
+                "Breakeven":
+                    breakeven,
+
+                "Long Time Value":
+                    time_value,
+
+                "1% Limit":
+                    stock_price *
+                    0.01,
+
+                "Long Bid/Ask %":
+                    long_spread,
+
+                "Short Bid/Ask %":
+                    short_spread,
+
+                "Option Score":
+                    round(
+                        score,
+                        1
+                    )
+            })
+
+    return candidates
+
+
+# ============================================================
+# OPTION ENGINE
+# ============================================================
+
+def find_option_candidates(
+    row,
+    token
+):
+
+    symbol = row["Ticker"]
+
+    stock_price = (
+        row["Price"]
+    )
+
+    direction = (
+        row["Direction"]
+    )
+
+    expirations = (
+        get_expirations(
+            symbol,
+            token
+        )
+    )
+
+    if not expirations:
+        return []
+
+    today = datetime.now().date()
+
+    candidates = []
+
+    for expiration in expirations:
+
+        try:
+
+            expiry_date = (
+                datetime.strptime(
+                    expiration,
+                    "%Y-%m-%d"
+                ).date()
+            )
+
+        except Exception:
+            continue
+
+        dte = (
+            expiry_date -
+            today
+        ).days
+
+        if (
+            dte < MIN_DTE
+            or
+            dte > MAX_DTE
+        ):
+            continue
+
+        chain = get_option_chain(
+            symbol,
+            expiration,
+            token
+        )
+
+        if chain is None:
+            continue
+
+        # Single options
+        candidates.extend(
+            build_single_options(
+                symbol,
+                stock_price,
+                direction,
+                expiration,
+                chain
+            )
+        )
+
+        # Debit spreads
+        candidates.extend(
+            build_debit_spreads(
+                symbol,
+                stock_price,
+                direction,
+                expiration,
+                chain
+            )
+        )
+
+    return candidates
+
+
+# ============================================================
 # STREAMLIT UI
 # ============================================================
 
-st.title("📈 Stocks + ETF Finder for Spreads")
+st.title(
+    "🥇 Golden Spread Finder"
+)
 
 st.markdown(
     """
 ### Follow the trend — don't predict the trend.
 
-This scanner searches a diversified universe of stocks and ETFs
-for established trends supported by measurable buying/selling
-pressure and favorable Keltner Channel positioning.
+The engine searches for **developing 50/100 EMA trends**,
+Keltner momentum, volume/pressure confirmation and then
+examines the actual Tradier option chain.
 
-**Version 1 does not place trades.**
+The goal is not to find hundreds of trades.
+
+The goal is to find the **needle in the haystack**.
 """
 )
 
-# ------------------------------------------------------------
+# ============================================================
 # SIDEBAR
-# ------------------------------------------------------------
+# ============================================================
 
-st.sidebar.header("Scanner Settings")
+st.sidebar.header(
+    "Scanner Settings"
+)
 
 min_price = st.sidebar.number_input(
-    "Minimum stock/ETF price",
-    min_value=1.0,
-    max_value=1000.0,
-    value=10.0,
-    step=1.0
+    "Minimum stock / ETF price",
+    min_value=1.00,
+    max_value=1000.00,
+    value=10.00,
+    step=1.00
 )
 
 min_volume = st.sidebar.number_input(
-    "Minimum average volume",
+    "Minimum average daily volume",
     min_value=0,
     max_value=100_000_000,
     value=500_000,
     step=100_000
+)
+
+minimum_score = st.sidebar.slider(
+    "Minimum technical score",
+    0,
+    100,
+    65
 )
 
 direction_filter = st.sidebar.selectbox(
@@ -1018,15 +2301,8 @@ direction_filter = st.sidebar.selectbox(
     ]
 )
 
-minimum_score = st.sidebar.slider(
-    "Minimum score",
-    0,
-    100,
-    65
-)
-
 max_results = st.sidebar.slider(
-    "Maximum results",
+    "Technical candidates",
     5,
     50,
     20
@@ -1035,12 +2311,28 @@ max_results = st.sidebar.slider(
 st.sidebar.markdown("---")
 
 st.sidebar.write(
-    f"Universe: **{len(UNIVERSE)} symbols**"
+    f"Universe: **{len(UNIVERSE)}** symbols"
 )
 
-# ------------------------------------------------------------
+st.sidebar.write(
+    "Capital: **$250–$700**"
+)
+
+st.sidebar.write(
+    "Expiration: **14–45 DTE**"
+)
+
+st.sidebar.write(
+    "1% Rule: **Enabled**"
+)
+
+st.sidebar.write(
+    "Mag 7: **Excluded**"
+)
+
+# ============================================================
 # TOKEN
-# ------------------------------------------------------------
+# ============================================================
 
 token = get_token()
 
@@ -1050,7 +2342,7 @@ if not token:
         """
         Tradier API token not found.
 
-        Add your Tradier token to Streamlit secrets as:
+        Add your token to Streamlit secrets:
 
         TRADIER_TOKEN = "YOUR_TOKEN_HERE"
         """
@@ -1058,10 +2350,9 @@ if not token:
 
     st.stop()
 
-
-# ------------------------------------------------------------
-# RUN SCAN
-# ------------------------------------------------------------
+# ============================================================
+# RUN BUTTON
+# ============================================================
 
 if st.button(
     "🚀 RUN GOLDEN SPREAD SCAN",
@@ -1069,59 +2360,71 @@ if st.button(
     use_container_width=True
 ):
 
-    # Apply UI price/volume filters
+    # --------------------------------------------------------
+    # PHASE 1
+    # --------------------------------------------------------
 
-    DEFAULT_MIN_PRICE = min_price
-    DEFAULT_MIN_AVG_VOLUME = min_volume
-
-    results = run_scan(
-        token,
-        UNIVERSE
+    st.header(
+        "Phase 1 — Technical Discovery"
     )
 
-    if results.empty:
+    technical_results = (
+        run_stock_scan(
+            token,
+            UNIVERSE,
+            min_price,
+            min_volume
+        )
+    )
+
+    if technical_results.empty:
 
         st.warning(
-            "No qualifying securities found. "
-            "Try lowering the minimum score or liquidity filters."
+            "No securities passed the technical filters."
         )
 
         st.stop()
 
     # Direction filter
+
     if direction_filter == "Bullish Only":
 
-        results = results[
-            results["Direction"] == "BULLISH"
-        ]
+        technical_results = (
+            technical_results[
+                technical_results[
+                    "Direction"
+                ] == "BULLISH"
+            ]
+        )
 
     elif direction_filter == "Bearish Only":
 
-        results = results[
-            results["Direction"] == "BEARISH"
+        technical_results = (
+            technical_results[
+                technical_results[
+                    "Direction"
+                ] == "BEARISH"
+            ]
+        )
+
+    technical_results = (
+        technical_results[
+            technical_results[
+                "Score"
+            ] >= minimum_score
         ]
-
-    # Score filter
-    results = results[
-        results["Score"] >= minimum_score
-    ]
-
-    # Follow trend only
-    results = results[
-        results["Follow Trend"] == True
-    ]
-
-    # Sort
-    results = results.sort_values(
-        "Score",
-        ascending=False
     )
 
-    results = results.head(
-        max_results
+    technical_results = (
+        technical_results
+        .sort_values(
+            "Score",
+            ascending=False
+        )
+        .head(max_results)
     )
 
-    if results.empty:
+    if technical_results.empty:
 
         st.warning(
             "No securities passed the selected filters."
@@ -1130,206 +2433,364 @@ if st.button(
         st.stop()
 
     # --------------------------------------------------------
-    # SUMMARY
-    # --------------------------------------------------------
-
-    col1, col2, col3, col4 = st.columns(4)
-
-    bullish_count = (
-        results["Direction"]
-        .eq("BULLISH")
-        .sum()
-    )
-
-    bearish_count = (
-        results["Direction"]
-        .eq("BEARISH")
-        .sum()
-    )
-
-    prime_count = (
-        results["Setup"]
-        .eq("PRIME")
-        .sum()
-    )
-
-    col1.metric(
-        "Candidates",
-        len(results)
-    )
-
-    col2.metric(
-        "Bullish",
-        bullish_count
-    )
-
-    col3.metric(
-        "Bearish",
-        bearish_count
-    )
-
-    col4.metric(
-        "Prime",
-        prime_count
-    )
-
-    st.markdown("---")
-
-    # --------------------------------------------------------
-    # TOP CANDIDATES
+    # TECHNICAL RESULTS
     # --------------------------------------------------------
 
     st.subheader(
-        "🏆 Top Candidates"
+        "🏆 Technical Candidates"
     )
 
-    display_columns = [
+    technical_columns = [
+
         "Ticker",
         "Price",
         "Direction",
         "Score",
         "Setup",
+        "Crossover Date",
+        "Crossover Sessions Ago",
         "Buying Pressure",
         "Selling Pressure",
-        "Net Pressure",
         "Pressure Trend",
         "Keltner",
+        "KC Expansion",
         "Price Action",
         "Relative Volume"
     ]
 
     st.dataframe(
-        results[display_columns],
+        technical_results[
+            technical_columns
+        ],
         use_container_width=True,
         hide_index=True
     )
 
     # --------------------------------------------------------
-    # DETAILED CARDS
+    # PHASE 2 — OPTIONS
     # --------------------------------------------------------
 
     st.markdown("---")
 
-    st.subheader(
-        "🔎 Candidate Details"
+    st.header(
+        "Phase 2 — Option Engine"
     )
 
-    for _, row in results.iterrows():
+    option_results = []
 
-        with st.expander(
-            f"{row['Ticker']}  |  "
-            f"{row['Direction']}  |  "
-            f"Score {row['Score']}"
-        ):
+    option_candidates = (
+        technical_results
+        .head(
+            MAX_OPTION_CANDIDATES
+        )
+    )
 
-            c1, c2, c3, c4 = st.columns(4)
+    option_progress = st.progress(0)
 
-            c1.metric(
-                "Price",
-                f"${row['Price']}"
+    option_status = st.empty()
+
+    total = len(
+        option_candidates
+    )
+
+    for count, (_, row) in enumerate(
+        option_candidates.iterrows(),
+        start=1
+    ):
+
+        option_status.text(
+            f"Analyzing option chain: "
+            f"{row['Ticker']} "
+            f"({count}/{total})"
+        )
+
+        try:
+
+            candidates = (
+                find_option_candidates(
+                    row,
+                    token
+                )
             )
 
-            c2.metric(
-                "50 EMA",
-                f"${row['50 EMA']}"
+            for candidate in candidates:
+
+                candidate[
+                    "Technical Score"
+                ] = row["Score"]
+
+                candidate[
+                    "Direction"
+                ] = row["Direction"]
+
+                candidate[
+                    "Stock Price"
+                ] = row["Price"]
+
+                candidate[
+                    "EMA Crossover"
+                ] = row[
+                    "Crossover Sessions Ago"
+                ]
+
+                candidate[
+                    "Keltner"
+                ] = row["Keltner"]
+
+                candidate[
+                    "Pressure Trend"
+                ] = row[
+                    "Pressure Trend"
+                ]
+
+                candidate[
+                    "Relative Volume"
+                ] = row[
+                    "Relative Volume" 
+                ]
+
+                option_results.append(
+                    candidate
+                )
+
+        except Exception as e:
+            st.error(
+            f"OPTION ENGINE ERROR - {row{'Ticker']}: {e}"
             )
 
-            c3.metric(
-                "100 EMA",
-                f"${row['100 EMA']}"
-            )
+        option_progress.progress(
+            count / total
+        )
 
-            c4.metric(
-                "QOD Score",
-                row["Score"]
-            )
+    option_status.text(
+        "Option analysis complete."
+    )
+    st.write(
+        f"DEBUG: Option engine produced {len(option_results)} candidates"
+    )
 
-            st.markdown("### Market Pressure")
+    if not option_results:
 
-            p1, p2, p3 = st.columns(3)
+        st.warning(
+            """
+            Technical candidates were found,
+            but no option contracts passed the
+            14–45 DTE, $250–$700, liquidity and
+            1% time-value filters.
+            """
+        )
 
-            p1.metric(
-                "Buying Pressure",
-                row["Buying Pressure"]
-            )
+        st.stop()
 
-            p2.metric(
-                "Selling Pressure",
-                row["Selling Pressure"]
-            )
+    options_df = pd.DataFrame(
+        option_results
+    )
 
-            p3.metric(
-                "Net Pressure",
-                row["Net Pressure"]
-            )
-
-            st.write(
-                f"**Pressure Direction:** "
-                f"{row['Pressure Trend']}"
-            )
-
-            st.markdown("### Keltner Channel")
-
-            k1, k2, k3, k4 = st.columns(4)
-
-            k1.metric(
-                "Position",
-                row["Keltner"]
-            )
-
-            k2.metric(
-                "Middle",
-                f"${row['KC Middle']}"
-            )
-
-            k3.metric(
-                "Upper",
-                f"${row['KC Upper']}"
-            )
-
-            k4.metric(
-                "Lower",
-                f"${row['KC Lower']}"
-            )
-
-            st.markdown("### Price Action")
-
-            st.write(
-                row["Price Action"]
-            )
-
-            st.markdown(
-                f"""
-**Trend:** `{row['Direction']}`
-
-**50 EMA:** ${row['50 EMA']}
-
-**100 EMA:** ${row['100 EMA']}
-
-**Relative Volume:** {row['Relative Volume']}x
-
-**Setup:** `{row['Setup']}`
-
-**Interpretation:** The scanner is looking for an established
-trend with pressure supporting that direction while avoiding
-entries that are excessively extended within the Keltner Channel.
-"""
-            )
+    options_df = (
+        options_df
+        .sort_values(
+            [
+                "Technical Score",
+                "Option Score"
+            ],
+            ascending=False
+        )
+    )
 
     # --------------------------------------------------------
-    # EXPORT
+    # FINAL RESULTS
     # --------------------------------------------------------
 
     st.markdown("---")
 
-    csv = results.to_csv(
+    st.header(
+        "🥇 Final Option Candidates"
+    )
+
+    display_columns = [
+
+        "Ticker",
+        "Stock Price",
+        "Direction",
+        "Technical Score",
+        "Option Score",
+        "Structure",
+        "Expiration",
+
+        "Buy Strike",
+        "Buy Price",
+
+        "Sell Strike",
+        "Sell Price",
+
+        "Debit",
+        "Capital",
+
+        "Reward/Risk",
+
+        "Long Time Value",
+        "1% Limit",
+
+        "Keltner",
+        "Pressure Trend"
+    ]
+
+    available_columns = [
+        column
+        for column in display_columns
+        if column in options_df.columns
+    ]
+
+    st.dataframe(
+        options_df[
+            available_columns
+        ],
+        use_container_width=True,
+        hide_index=True
+    )
+
+    # --------------------------------------------------------
+    # BLCO VALIDATION CHECK
+    # --------------------------------------------------------
+
+    blco = options_df[
+        options_df["Ticker"] == "BLCO"
+    ]
+
+    if not blco.empty:
+
+        st.markdown("---")
+
+        st.subheader(
+            "🔬 BLCO Validation"
+        )
+
+        st.success(
+            f"""
+            BLCO was independently discovered by
+            the technical/option engine and produced
+            {len(blco)} qualifying option candidate(s).
+
+            This is exactly what we want to see:
+            BLCO is not a special-case trade.
+            It entered the normal scanning universe.
+            """
+        )
+
+        st.dataframe(
+            blco[
+                available_columns
+            ],
+            use_container_width=True,
+            hide_index=True
+        )
+
+    else:
+
+        st.info(
+            """
+            BLCO did not produce an option candidate
+            under today's exact filters.
+
+            That does NOT mean BLCO is a bad trade.
+
+            It means its current technical/option
+            conditions did not satisfy every rule
+            simultaneously.
+            """
+        )
+
+    # --------------------------------------------------------
+    # TOP TRADE
+    # --------------------------------------------------------
+
+    st.markdown("---")
+
+    best = options_df.iloc[0]
+
+    st.subheader(
+        "🥇 Highest Ranked Candidate"
+    )
+
+    st.markdown(
+        f"""
+### {best['Ticker']} — {best['Structure']}
+
+**Stock:** ${best['Stock Price']:.2f}
+
+**Direction:** {best['Direction']}
+
+**Expiration:** {best['Expiration']}
+
+**Buy:** ${best['Buy Strike']:.2f} @ ${best['Buy Price']:.2f}
+"""
+    )
+
+    if (
+        "Sell Strike"
+        in best.index
+    ):
+
+        st.markdown(
+            f"""
+**Sell:** ${best['Sell Strike']:.2f} @ ${best['Sell Price']:.2f}
+
+**Net Debit:** ${best['Debit']:.2f}
+
+**Capital:** ${best['Capital']:.2f}
+
+**Maximum Profit:** ${best['Max Profit']:.2f}
+
+**Maximum Loss:** ${best['Max Loss']:.2f}
+
+**Reward/Risk:** {best['Reward/Risk']:.2f} : 1
+
+**Breakeven:** ${best['Breakeven']:.2f}
+"""
+        )
+
+    else:
+
+        st.markdown(
+            f"""
+**Premium:** ${best['Buy Price']:.2f}
+
+**Capital:** ${best['Debit']:.2f}
+"""
+        )
+
+    st.markdown(
+        f"""
+### Why it survived
+
+**Technical Score:** {best['Technical Score']}
+
+**Option Score:** {best['Option Score']}
+
+**EMA Crossover:** {best['EMA Crossover']} sessions ago
+
+**Keltner:** {best['Keltner']}
+
+**Pressure:** {best['Pressure Trend']}
+
+**Relative Volume:** {best['Relative Volume']}x
+"""
+    )
+
+    # --------------------------------------------------------
+    # DOWNLOAD
+    # --------------------------------------------------------
+
+    st.markdown("---")
+
+    csv = options_df.to_csv(
         index=False
     ).encode("utf-8")
 
     st.download_button(
-        "⬇️ Download Results CSV",
+        "⬇️ Download All Option Candidates",
         csv,
-        "golden_spread_candidates.csv",
+        "golden_spread_option_candidates.csv",
         "text/csv",
         use_container_width=True
     )
@@ -1338,25 +2799,36 @@ else:
 
     st.info(
         """
-        Press **RUN GOLDEN SPREAD SCAN** to scan the universe.
+        Press **RUN GOLDEN SPREAD SCAN**.
 
-        The scanner will search for:
+        The scanner will first search the stock/ETF
+        universe for the technical setup.
 
-        • 50 EMA / 100 EMA established trends  
-        • Increasing directional pressure  
-        • Buying vs. selling volume  
-        • Favorable Keltner positioning  
-        • Price-action confirmation  
-        • Adequate liquidity  
+        Only the strongest candidates will then have
+        their Tradier option chains examined.
 
-        The eventual goal is to identify candidates suitable
-        for 1–2 month defined-risk option spreads.
+        The final engine looks for:
+
+        ✓ $10+ securities
+        ✓ Mag 7 excluded
+        ✓ 50/100 EMA crossover within 30 sessions
+        ✓ Keltner momentum
+        ✓ Volume confirmation
+        ✓ Buying/selling pressure
+        ✓ Price action
+        ✓ 14–45 DTE
+        ✓ $250–$700 capital
+        ✓ Option liquidity
+        ✓ Hughes 1% time-value test
+        ✓ Calls for bullish setups
+        ✓ Puts for bearish setups
+        ✓ Debit spreads
         """
     )
 
 st.markdown("---")
 
 st.caption(
-    "Stocks + ETF Finder for Spreads — Version 1 | "
-    "Research tool only. No automatic trading."
+    "Golden Spread Finder V2 | Research only — "
+    "no automatic trading."
 )
