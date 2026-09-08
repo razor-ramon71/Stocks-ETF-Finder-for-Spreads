@@ -72,41 +72,157 @@ MAG_7 = {
 # ============================================================
 
 UNIVERSE = [
-    # Broad ETFs
-    "SPY", "QQQ", "IWM", "DIA",
-    "XLF", "XLK", "XLE", "XLV",
-    "XLI", "XLP", "XLY", "XLB",
-    "XLU", "SMH", "XBI",
+   UNIVERSE = [
+    # =========================
+    # BROAD MARKET / ETFs
+    # =========================
+    "SPY", "QQQ", "IWM", "DIA", "MDY", "VOO", "VTI",
+    "XLF", "XLK", "XLE", "XLV", "XLI", "XLP", "XLY",
+    "XLB", "XLU", "XLRE", "XLC",
+    "SMH", "SOXX", "IGV", "HACK", "ARKK", "ARKQ",
+    "XBI", "IBB", "IYR", "XRT", "XME", "XOP",
+    "OIH", "KRE", "KBE", "ITA", "JETS", "IYT",
+    "TLT", "IEF", "GLD", "SLV", "USO", "UNG",
 
-    # Technology
-    "AMD", "AVGO", "CRM", "ORCL", "ADBE",
-    "NOW", "INTC", "MU", "MRVL", "DELL",
-    "CSCO", "IBM", "QCOM", "TXN",
+    # =========================
+    # TECHNOLOGY / SEMIS
+    # =========================
+    "AMD", "AVGO", "CRM", "ORCL", "ADBE", "NOW",
+    "INTC", "MU", "MRVL", "DELL", "CSCO", "IBM",
+    "QCOM", "TXN", "AMAT", "LRCX", "KLAC", "ADI",
+    "NXPI", "ON", "MCHP", "MPWR", "TER", "ARM",
+    "ANET", "APH", "KEYS", "FTNT", "PANW", "CRWD",
+    "ZS", "OKTA", "DDOG", "NET", "SNPS", "CDNS",
+    "ADSK", "INTU", "WDAY", "TEAM", "HUBS", "VEEV",
+    "FSLR", "ENPH", "SEDG", "PLTR", "IONQ",
 
-    # Financial
-    "V", "MA", "JPM", "BAC", "GS",
-    "MS", "C", "COF", "AXP", "PYPL",
-    "HOOD",
+    # =========================
+    # SOFTWARE / INTERNET / MEDIA
+    # =========================
+    "NFLX", "DIS", "CMCSA", "WBD", "ROKU", "SPOT",
+    "UBER", "LYFT", "ABNB", "DASH", "BKNG", "EXPE",
+    "SHOP", "ETSY", "EBAY", "PINS", "SNAP",
+    "RBLX", "EA", "TTWO", "MTCH", "PARA",
+    "GDDY", "ZM", "DOCU", "TWLO", "MDB", "PDD",
+    "BABA", "JD", "NIO", "LI", "XPEV",
 
-    # Consumer
-    "WMT", "COST", "HD", "LOW",
-    "NKE", "TGT", "KO", "PEP", "MCD",
+    # =========================
+    # FINANCIALS / BANKS
+    # =========================
+    "JPM", "BAC", "GS", "MS", "C", "COF", "AXP",
+    "PYPL", "HOOD", "SCHW", "BLK", "BX", "KKR",
+    "APO", "ARES", "ICE", "CME", "CBOE", "SPGI",
+    "MCO", "V", "MA", "FI", "FIS", "GPN",
+    "COIN", "SOFI", "ALLY", "DFS", "SYF",
+    "USB", "PNC", "TFC", "BK", "STT", "FITB",
+    "KEY", "RF", "CFG", "HBAN", "MTB",
 
-    # Industrials
-    "CAT", "DE", "GE", "HON", "RTX",
-    "BA", "UPS",
+    # =========================
+    # CONSUMER / RETAIL
+    # =========================
+    "WMT", "COST", "HD", "LOW", "TGT", "NKE",
+    "MCD", "SBUX", "CMG", "TJX", "ROST", "DG",
+    "DLTR", "BBY", "ULTA", "ORLY", "AZO", "TSCO",
+    "F", "GM", "CCL", "RCL", "NCLH",
+    "YUM", "DPZ", "DRI", "LULU", "DECK",
+    "EL", "CLX", "CHD", "KMB", "CL",
+    "KO", "PEP", "MDLZ", "KHC", "GIS",
+    "K", "HSY", "STZ", "MNST",
 
-    # Energy
-    "XOM", "CVX", "SLB",
+    # =========================
+    # INDUSTRIALS
+    # =========================
+    "CAT", "DE", "GE", "HON", "RTX", "BA",
+    "UPS", "FDX", "CSX", "UNP", "NSC",
+    "LMT", "NOC", "GD", "TXT", "ETN",
+    "EMR", "ROK", "PH", "ITW", "DOV",
+    "CARR", "TT", "OTIS", "PCAR", "CMI",
+    "URI", "FAST", "GWW", "PWR", "JCI",
+    "DAL", "UAL", "LUV", "AAL",
 
-    # Healthcare
-    "UNH", "LLY", "JNJ", "ABBV",
-    "PFE", "MRK", "ABT",
+    # =========================
+    # ENERGY / OIL / GAS
+    # =========================
+    "XOM", "CVX", "COP", "EOG", "OXY", "SLB",
+    "HAL", "BKR", "MPC", "VLO", "PSX", "HES",
+    "DVN", "FANG", "APA", "OKE", "WMB",
+    "KMI", "ET", "EPD", "TRGP", "LNG",
+    "CTRA", "EQT", "AR", "MRO", "OVV",
+    "CHRD", "RRC", "CNX",
 
-    # Communication / internet / growth
-    "DIS", "NFLX", "UBER", "SHOP",
-    "CRWD", "COIN", "PLTR"
+    # =========================
+    # HEALTHCARE / PHARMA
+    # =========================
+    "LLY", "UNH", "JNJ", "ABBV", "PFE", "MRK",
+    "ABT", "TMO", "DHR", "BMY", "AMGN", "GILD",
+    "VRTX", "REGN", "ISRG", "SYK", "MDT",
+    "BSX", "EW", "ZBH", "BDX", "CI", "ELV",
+    "CVS", "HUM", "HCA", "CNC", "MCK",
+    "CAH", "COR", "IQV", "DXCM", "ALGN",
+    "BIIB", "MRNA", "RMD", "HOLX", "PODD",
+
+    # =========================
+    # MATERIALS / CHEMICALS
+    # =========================
+    "LIN", "APD", "SHW", "ECL", "DD", "DOW",
+    "NEM", "FCX", "NUE", "STLD", "CLF",
+    "AA", "VMC", "MLM", "CF", "MOS",
+    "ALB", "CE", "EMN", "PPG", "IFF",
+
+    # =========================
+    # REAL ESTATE
+    # =========================
+    "PLD", "AMT", "EQIX", "CCI", "PSA", "O",
+    "SPG", "WELL", "DLR", "AVB", "EQR", "VICI",
+    "IRM", "EXR", "SBAC", "WY",
+
+    # =========================
+    # TELECOM / COMMUNICATIONS
+    # =========================
+    "T", "VZ", "TMUS", "CHTR", "LUMN",
+    "VOD", "ERIC", "NOK",
+
+    # =========================
+    # AUTOMOTIVE / EV / MOBILITY
+    # =========================
+    "RIVN", "LCID", "QS", "RIVN", "MGA", "LEA",
+    "APTV", "BWA", "LKQ", "GPC",
+
+    # =========================
+    # DEFENSE / AEROSPACE
+    # =========================
+    "HII", "LDOS", "BAH", "KTOS", "AVAV",
+    "AXON", "TDG", "HEI",
+
+    # =========================
+    # REITS / SPECIALTY FINANCIAL
+    # =========================
+    "CBRE", "CINF", "TRV", "ALL", "PGR",
+    "AIG", "MET", "PRU", "AFL", "HIG",
+
+    # =========================
+    # HIGH-LIQUIDITY / SWING CANDIDATES
+    # =========================
+    "CELH", "CVNA", "DKNG", "MSTR", "TEM",
+    "APP", "AFRM", "UPST", "RKT", "OPEN",
+    "CHWY", "W", "CVNA", "IONQ", "RKLB",
+    "ASTS", "SOFI", "HOOD", "PLTR", "COIN"
 ]
+
+# =========================
+# EXCLUDE MAG 7
+# =========================
+MAG_7 = {
+    "AAPL",
+    "MSFT",
+    "NVDA",
+    "AMZN",
+    "META",
+    "GOOGL",
+    "TSLA"
+}
+
+UNIVERSE = [s for s in UNIVERSE if s not in MAG_7]
 
 UNIVERSE = [
     symbol for symbol in UNIVERSE
