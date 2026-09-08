@@ -47,8 +47,8 @@ MIN_AVG_VOLUME = 500_000
 MIN_CAPITAL = 250
 MAX_CAPITAL = 700
 
-MIN_DTE = 14
-MAX_DTE = 45
+MIN_DTE = 7
+MAX_DTE = 35
 
 EMA_FAST = 50
 EMA_SLOW = 100
@@ -1322,8 +1322,8 @@ def run_stock_scan(
                 if result is not None:
                     results.append(result)
 
-            except Exception:
-                pass
+            except Exception as e:
+                st.error(f"Option engine error for {row['Ticker']}: {e}")
 
             progress.progress(
                 completed / total
