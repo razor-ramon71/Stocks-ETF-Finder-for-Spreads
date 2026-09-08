@@ -2563,7 +2563,7 @@ if st.button(
     option_status.text(
         "Option analysis complete."
     )
-    st.write(f"DEBUG: Option engine produced {1en(option_results)} candidates")
+    st.write(f"DEBUG: Option engine produced {len(option_results)} candidates")
     if not option_results:
 
         st.warning(
