@@ -178,95 +178,52 @@ def safe_float(value, default=np.nan):
 # Test issues are handled gracefully.
 # ============================================================
 
-@st.cache_data(ttl=86400)
-def get_dynamic_stock_universe():
+@st.cache_data(ttl=900)
+def filter_universe_by_price(symbols):
+    """Fast price pre-filter using batched Tradier quotes."""
+    filtered = []
 
-    url = (
-        "https://www.nasdaqtrader.com/"
-        "dynamic/SymDir/nasdaqtraded.txt"
-    )
+    # Tradier can accept multiple symbols in one quote request
+    batch_size = 100
 
-    try:
+    for i in range(0, len(symbols), batch_size):
+        batch = symbols[i:i + batch_size]
 
-        response = requests.get(
-            url,
-            timeout=30
-        )
+        try:
+            data = get_json(
+                f"{TRADIER_BASE}/markets/quotes",
+                params={"symbols": ",".join(batch)},
+                timeout=15
+            )
 
-        if response.status_code != 200:
-            return []
-
-        lines = response.text.splitlines()
-
-        rows = []
-
-        for line in lines:
-
-            if not line:
+            if not data:
                 continue
 
-            if line.startswith("Nasdaq Traded"):
-                continue
+            quotes = data.get("quotes", {}).get("quote", [])
 
-            if line.startswith("File Creation"):
-                continue
+            if isinstance(quotes, dict):
+                quotes = [quotes]
 
-            parts = line.split("|")
+            for q in quotes:
+                symbol = q.get("symbol")
+                price = q.get("last")
 
-            if len(parts) < 8:
-                continue
+                if symbol is None or price is None:
+                    continue
 
-            symbol = parts[1].strip()
-            security_name = parts[2].strip()
-            market_category = parts[3].strip()
-            test_issue = parts[4].strip()
-            financial_status = parts[5].strip()
-            round_lot = parts[6].strip()
-            etf = parts[7].strip()
+                try:
+                    price = float(price)
+                except (TypeError, ValueError):
+                    continue
 
-            if not symbol:
-                continue
+                if MIN_PRICE <= price <= MAX_PRICE:
+                    filtered.append(symbol)
 
-            # Remove test securities
-            if test_issue.upper() == "Y":
-                continue
+        except Exception:
+            continue
 
-            # Remove ETFs
-            if etf.upper() == "Y":
-                continue
-
-            # Remove obvious special symbols
-            if "$" in symbol:
-                continue
-
-            if "^" in symbol:
-                continue
-
-            if "/" in symbol:
-                continue
-
-            rows.append({
-                "symbol": symbol,
-                "name": security_name,
-                "market": market_category,
-                "financial_status": financial_status
-            })
-
-        df = pd.DataFrame(rows)
-
-        if df.empty:
-            return []
-
-        # Additional cleanup
-        df = df.drop_duplicates(
-            subset=["symbol"]
-        )
-
-        return df["symbol"].tolist()
-
-    except Exception:
-        return []
-
+    return filtered
+    
 
 # ============================================================
 # HISTORICAL DATA
