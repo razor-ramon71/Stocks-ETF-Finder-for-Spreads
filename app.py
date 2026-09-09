@@ -1931,7 +1931,7 @@ st.divider()
 universe = (
     get_dynamic_stock_universe()
 )
-
+universe = filter_universe_by_price(universe)
 u1, u2, u3, u4 = st.columns(4)
 
 with u1:
