@@ -167,63 +167,175 @@ def safe_float(value, default=np.nan):
 # ============================================================
 # DYNAMIC STOCK UNIVERSE
 # ============================================================
-#
-# Nasdaq Trader's symbol directory contains U.S. traded
-# securities and an ETF flag.
-#
-# We use it to create a much larger universe than the
-# old 136-symbol hard-coded list.
-#
-# ETF = Y is excluded.
-# Test issues are handled gracefully.
+
+@st.cache_data(ttl=86400)
+def get_dynamic_stock_universe():
+
+    url = (
+        "https://www.nasdaqtrader.com/"
+        "dynamic/SymDir/nasdaqtraded.txt"
+    )
+
+    try:
+
+        response = requests.get(
+            url,
+            timeout=30
+        )
+
+        if response.status_code != 200:
+            return []
+
+        lines = response.text.splitlines()
+
+        rows = []
+
+        for line in lines:
+
+            if not line:
+                continue
+
+            if line.startswith("Nasdaq Traded"):
+                continue
+
+            if line.startswith("File Creation"):
+                continue
+
+            parts = line.split("|")
+
+            if len(parts) < 8:
+                continue
+
+            symbol = parts[1].strip()
+            security_name = parts[2].strip()
+            test_issue = parts[4].strip()
+            etf = parts[7].strip()
+
+            if not symbol:
+                continue
+
+            # Remove test securities
+            if test_issue.upper() == "Y":
+                continue
+
+            # Remove ETFs
+            if etf.upper() == "Y":
+                continue
+
+            # Remove special symbols
+            if "$" in symbol:
+                continue
+
+            if "^" in symbol:
+                continue
+
+            if "/" in symbol:
+                continue
+
+            rows.append({
+                "symbol": symbol,
+                "name": security_name
+            })
+
+        df = pd.DataFrame(rows)
+
+        if df.empty:
+            return []
+
+        df = df.drop_duplicates(
+            subset=["symbol"]
+        )
+
+        return df["symbol"].tolist()
+
+    except Exception:
+        return []
+
+
+# ============================================================
+# FAST PRICE FILTER
 # ============================================================
 
 @st.cache_data(ttl=900)
 def filter_universe_by_price(symbols):
-    """Fast price pre-filter using batched Tradier quotes."""
+
     filtered = []
 
-    # Tradier can accept multiple symbols in one quote request
     batch_size = 100
 
-    for i in range(0, len(symbols), batch_size):
-        batch = symbols[i:i + batch_size]
+    for i in range(
+        0,
+        len(symbols),
+        batch_size
+    ):
+
+        batch = symbols[
+            i:i + batch_size
+        ]
 
         try:
+
             data = get_json(
                 f"{TRADIER_BASE}/markets/quotes",
-                params={"symbols": ",".join(batch)},
+                params={
+                    "symbols": ",".join(batch)
+                },
                 timeout=15
             )
 
             if not data:
                 continue
 
-            quotes = data.get("quotes", {}).get("quote", [])
+            quotes = (
+                data
+                .get("quotes", {})
+                .get("quote", [])
+            )
 
-            if isinstance(quotes, dict):
+            if isinstance(
+                quotes,
+                dict
+            ):
                 quotes = [quotes]
 
             for q in quotes:
-                symbol = q.get("symbol")
-                price = q.get("last")
 
-                if symbol is None or price is None:
+                symbol = q.get(
+                    "symbol"
+                )
+
+                price = q.get(
+                    "last"
+                )
+
+                if (
+                    symbol is None
+                    or price is None
+                ):
                     continue
 
                 try:
                     price = float(price)
-                except (TypeError, ValueError):
+
+                except (
+                    TypeError,
+                    ValueError
+                ):
                     continue
 
-                if MIN_PRICE <= price <= MAX_PRICE:
-                    filtered.append(symbol)
+                if (
+                    MIN_PRICE
+                    <= price
+                    <= MAX_PRICE
+                ):
+                    filtered.append(
+                        symbol
+                    )
 
         except Exception:
             continue
 
     return filtered
-    
 
 # ============================================================
 # HISTORICAL DATA
