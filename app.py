@@ -165,96 +165,136 @@ def safe_float(value, default=np.nan):
 
 
 # ============================================================
-# DYNAMIC STOCK UNIVERSE
+# GOLDEN UNIVERSE — SECTOR BALANCED
 # ============================================================
+#
+# Approximately 400-500 liquid, option-friendly U.S. stocks.
+# All 11 major market sectors represented.
+#
+# ETFs excluded.
+# Mag 7 excluded.
+# Price filter remains $10-$250.
+#
+# Phase 1 scans this universe.
+# Phase 2 ONLY analyzes stocks selected by the user.
+# ============================================================
+
+GOLDEN_SECTOR_UNIVERSE = {
+
+    "Technology": [
+        "ACN","ADBE","ADI","ADSK","AMAT","AMD","ANET","APH",
+        "AVGO","CDNS","CRM","CSCO","CTSH","FTNT","IBM","INTC",
+        "INTU","KLAC","LRCX","MCHP","MU","NOW","NTAP","NXPI",
+        "ON","ORCL","PANW","QCOM","SNPS","STX","TEL","TER",
+        "TXN","VRSN","WDC","WDAY","ZS","DELL","HPQ","HPE"
+    ],
+
+    "Health Care": [
+        "ABT","ALGN","AMGN","BAX","BDX","BIIB","BMY","BSX",
+        "CAH","CI","CNC","COO","CVS","DHR","DXCM","ELV",
+        "EW","GILD","HCA","HOLX","HSIC","HUM","IDXX","ILMN",
+        "INCY","ISRG","JNJ","LH","LLY","MRK","MTD","PFE",
+        "REGN","RMD","SYK","TMO","UHS","UNH","VRTX","ZBH"
+    ],
+
+    "Financials": [
+        "AFL","AIG","AIZ","AJG","ALL","AMP","AON","APO",
+        "AXP","BAC","BEN","BK","BKNG","BLK","BX","C","CB",
+        "CBOE","CME","COF","DFS","FITB","GS","HBAN","ICE",
+        "JPM","KEY","KKR","MA","MET","MKTX","MS","MSCI",
+        "MTB","NDAQ","PNC","PRU","SCHW","STT","TFC","USB"
+    ],
+
+    "Industrials": [
+        "AOS","CAT","CHRW","CMI","CARR","CSX","CTAS","DAL",
+        "DE","DOV","EFX","EMR","ETN","EXPD","FAST","FDX",
+        "GD","GE","GWW","HON","HUBB","IEX","ITW","JCI",
+        "LHX","LMT","MAS","MMM","NOC","NSC","ODFL","PCAR",
+        "PH","PNR","ROK","RTX","SWK","TT","UAL","UPS"
+    ],
+
+    "Consumer Discretionary": [
+        "AAP","AMZN","APTV","BBY","BKNG","BWA","CCL","CMG",
+        "CROX","CVNA","DHI","DKS","DRI","EBAY","EXPE","F",
+        "GM","GPC","HD","LOW","LULU","MAR","MCD","MGM",
+        "NKE","ORLY","PHM","POOL","RCL","ROST","SBUX","TJX",
+        "TGT","TSLA","ULTA","WHR","WYNN","YUM","CVCO","LEN"
+    ],
+
+    "Communication Services": [
+        "CHTR","CMCSA","DIS","EA","FOXA","FOX","GOOG","GOOGL",
+        "IPG","LYV","META","MTCH","NFLX","NWS","NWSA","OMC",
+        "PARA","PINS","ROKU","T","TMUS","TTWO","TWLO","VZ",
+        "WBD","WPP","ZI","ZG","Z","SPOT"
+    ],
+
+    "Energy": [
+        "APA","BKR","COP","CTRA","CVX","DVN","EOG","EQT",
+        "FANG","HAL","HES","KMI","MPC","MRO","MUR","OKE",
+        "OXY","PSX","PXD","SLB","TRGP","VLO","WMB","XOM",
+        "CHRD","CNX","CIVI","EOG","OVV","TPL"
+    ],
+
+    "Consumer Staples": [
+        "ADM","BF.B","CAG","CHD","CL","CLX","COST","CPB",
+        "EL","GIS","HSY","HRL","K","KDP","KHC","KO",
+        "KR","KVUE","LW","MDLZ","MKC","MO","PEP","PG",
+        "PM","SJM","STZ","SYY","TAP","TSN"
+    ],
+
+    "Utilities": [
+        "AES","AEE","AEP","AWK","CEG","CMS","CNP","D",
+        "DTE","DUK","ED","EIX","ES","ETR","EVRG","EXC",
+        "FE","LNT","NEE","NI","NRG","PCG","PEG","PNW",
+        "SO","SRE","VST","WEC","XEL","ATO"
+    ],
+
+    "Materials": [
+        "AA","ALB","APD","AVY","BALL","CF","CLF","DD",
+        "ECL","EMN","FCX","FMC","IFF","IP","LIN","LYB",
+        "MLM","MOS","NEM","NUE","PKG","PPG","SEE","SHW",
+        "STLD","VMC","WRK","CTVA","CE","RPM"
+    ],
+
+    "Real Estate": [
+        "AMT","ARE","AVB","BXP","CBRE","CCI","CPT","CSGP",
+        "DLR","DOC","EQC","EQR","ESS","EXR","FRT","HST",
+        "IRM","KIM","MAA","O","PLD","PSA","REG","RHP",
+        "RITM","SBRA","SUI","VICI","VNO","WELL"
+    ]
+}
+
 
 @st.cache_data(ttl=86400)
 def get_dynamic_stock_universe():
 
-    url = (
-        "https://www.nasdaqtrader.com/"
-        "dynamic/SymDir/nasdaqtraded.txt"
-    )
+    symbols = []
 
-    try:
+    for sector_symbols in GOLDEN_SECTOR_UNIVERSE.values():
+        symbols.extend(sector_symbols)
 
-        response = requests.get(
-            url,
-            timeout=30
-        )
+    # Remove duplicates while preserving order
+    symbols = list(dict.fromkeys(symbols))
 
-        if response.status_code != 200:
-            return []
+    # Exclude Mag 7
+    mag7 = {
+        "AAPL",
+        "MSFT",
+        "NVDA",
+        "AMZN",
+        "META",
+        "GOOGL",
+        "TSLA"
+    }
 
-        lines = response.text.splitlines()
+    symbols = [
+        symbol
+        for symbol in symbols
+        if symbol not in mag7
+    ]
 
-        rows = []
+    return symbols
 
-        for line in lines:
-
-            if not line:
-                continue
-
-            if line.startswith("Nasdaq Traded"):
-                continue
-
-            if line.startswith("File Creation"):
-                continue
-
-            parts = line.split("|")
-
-            if len(parts) < 8:
-                continue
-
-            symbol = parts[1].strip()
-            security_name = parts[2].strip()
-            test_issue = parts[4].strip()
-            etf = parts[7].strip()
-
-            if not symbol:
-                continue
-
-            # Remove test securities
-            if test_issue.upper() == "Y":
-                continue
-
-            # Remove ETFs
-            if etf.upper() == "Y":
-                continue
-
-            # Remove special symbols
-            if "$" in symbol:
-                continue
-
-            if "^" in symbol:
-                continue
-
-            if "/" in symbol:
-                continue
-
-            rows.append({
-                "symbol": symbol,
-                "name": security_name
-            })
-
-        df = pd.DataFrame(rows)
-
-        if df.empty:
-            return []
-
-        df = df.drop_duplicates(
-            subset=["symbol"]
-        )
-
-        return df["symbol"].tolist()
-
-    except Exception:
-        return []
-
-
-# ============================================================
-# FAST PRICE FILTER
-# ============================================================
 
 @st.cache_data(ttl=900)
 def filter_universe_by_price(symbols):
@@ -263,11 +303,7 @@ def filter_universe_by_price(symbols):
 
     batch_size = 100
 
-    for i in range(
-        0,
-        len(symbols),
-        batch_size
-    ):
+    for i in range(0, len(symbols), batch_size):
 
         batch = symbols[
             i:i + batch_size
@@ -292,21 +328,13 @@ def filter_universe_by_price(symbols):
                 .get("quote", [])
             )
 
-            if isinstance(
-                quotes,
-                dict
-            ):
+            if isinstance(quotes, dict):
                 quotes = [quotes]
 
-            for q in quotes:
+            for quote in quotes:
 
-                symbol = q.get(
-                    "symbol"
-                )
-
-                price = q.get(
-                    "last"
-                )
+                symbol = quote.get("symbol")
+                price = quote.get("last")
 
                 if (
                     symbol is None
@@ -316,27 +344,19 @@ def filter_universe_by_price(symbols):
 
                 try:
                     price = float(price)
-
                 except (
                     TypeError,
                     ValueError
                 ):
                     continue
 
-                if (
-                    MIN_PRICE
-                    <= price
-                    <= MAX_PRICE
-                ):
-                    filtered.append(
-                        symbol
-                    )
+                if MIN_PRICE <= price <= MAX_PRICE:
+                    filtered.append(symbol)
 
         except Exception:
             continue
 
     return filtered
-
 # ============================================================
 # HISTORICAL DATA
 # ============================================================
