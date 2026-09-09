@@ -4,13 +4,32 @@ import requests
 import pandas as pd
 import numpy as np
 import streamlit as st
+
 from datetime import datetime, timedelta
+
 
 # ============================================================
 # GOLDEN SCANNER
-# Swing Stock + Options Scanner
-# Stocks ONLY — No ETFs
-# Tradier Market Data
+# ============================================================
+# Golden Swing Hunter
+#
+# PHASE 1:
+#   Large dynamic U.S. stock universe
+#   Stocks ONLY
+#   $10+
+#   Technical Golden setup
+#   Bullish setups only
+#
+# PHASE 2:
+#   ONLY stocks selected by the user
+#   CALLS ONLY
+#   14-45 DTE
+#   Chuck Hughes 1% time-value rule
+# ============================================================
+
+
+# ============================================================
+# PAGE CONFIG
 # ============================================================
 
 st.set_page_config(
@@ -19,14 +38,15 @@ st.set_page_config(
     layout="wide"
 )
 
-# ------------------------------------------------------------
+
+# ============================================================
 # SETTINGS
-# ------------------------------------------------------------
+# ============================================================
 
 MIN_PRICE = 10.00
 MAX_PRICE = 500.00
 
-MIN_REL_VOLUME = 1.20
+MIN_RELATIVE_VOLUME = 1.20
 
 EMA_FAST = 20
 EMA_50 = 50
@@ -35,22 +55,23 @@ EMA_100 = 100
 RSI_LENGTH = 14
 ATR_LENGTH = 14
 
+CROSSOVER_LOOKBACK = 30
+
 MIN_SCORE = 60
 
 OPTION_DTE_MIN = 14
 OPTION_DTE_MAX = 45
 
-ACCOUNT_MIN = 2000
-ACCOUNT_MAX = 5000
+HUGHES_TIME_VALUE_LIMIT = 0.01
 
-# Chuck Hughes 1% rule:
-# Preferred option time value <= 1% of underlying price
-ONE_PERCENT_RULE = 0.01
+MAX_OPTION_SPREAD_PERCENT = 25
+
+HISTORY_DAYS = 260
 
 
-# ------------------------------------------------------------
-# TRADIER CONNECTION
-# ------------------------------------------------------------
+# ============================================================
+# TRADIER
+# ============================================================
 
 TRADIER_TOKEN = st.secrets.get(
     "TRADIER_TOKEN",
@@ -65,110 +86,199 @@ HEADERS = {
 }
 
 
-# ------------------------------------------------------------
+# ============================================================
 # SESSION STATE
-# ------------------------------------------------------------
+# ============================================================
 
 if "scan_results" not in st.session_state:
     st.session_state.scan_results = None
 
+if "selected_tickers" not in st.session_state:
+    st.session_state.selected_tickers = []
+
 if "option_results" not in st.session_state:
-    st.session_state.option_results = {}
+    st.session_state.option_results = None
 
 
-# ------------------------------------------------------------
-# PAGE HEADER
-# ------------------------------------------------------------
+# ============================================================
+# HEADER
+# ============================================================
 
 st.title("🏆 Golden Scanner")
+
 st.caption(
-    "Golden Swing Hunter • Stocks Only • Optionable • 14–45 DTE"
+    "Golden Swing Hunter • Stocks Only • Bullish Call Setups"
 )
+
 
 if not TRADIER_TOKEN:
     st.error(
-        "Tradier token not found. Add TRADIER_TOKEN to Streamlit secrets."
+        "TRADIER_TOKEN was not found. "
+        "Add it to Streamlit Secrets."
     )
     st.stop()
+
 
 st.success("Tradier connection configured.")
 
 
-# ------------------------------------------------------------
-# HELPERS
-# ------------------------------------------------------------
+# ============================================================
+# HTTP HELPER
+# ============================================================
 
-def safe_float(value, default=np.nan):
+def get_json(url, params=None, timeout=20):
+
     try:
-        if value is None:
-            return default
-        return float(value)
-    except Exception:
-        return default
 
-
-def get_json(url, params=None):
-    try:
-        r = requests.get(
+        response = requests.get(
             url,
             headers=HEADERS,
             params=params,
-            timeout=20
+            timeout=timeout
         )
 
-        if r.status_code != 200:
+        if response.status_code != 200:
             return None
 
-        return r.json()
+        return response.json()
 
     except Exception:
         return None
 
 
-# ------------------------------------------------------------
-# STOCK UNIVERSE
-# ------------------------------------------------------------
+# ============================================================
+# SAFE NUMBER
+# ============================================================
 
-# Large, liquid individual-stock universe.
-# ETFs are deliberately NOT included.
+def safe_float(value, default=np.nan):
 
-STOCK_UNIVERSE = [
-    "AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","TSLA",
-    "AVGO","AMD","NFLX","CRM","ORCL","ADBE","CSCO","QCOM",
-    "INTC","MU","AMAT","LRCX","KLAC","TXN","MRVL","ARM",
-    "SMCI","PANW","CRWD","PLTR","NOW","SNOW","DDOG","NET",
-    "SHOP","UBER","ABNB","BKNG","DASH","PYPL","SQ","COIN",
-    "HOOD","SOFI","RIVN","F","GM","NIO","XPEV",
-    "JPM","BAC","WFC","C","GS","MS","BLK","SCHW",
-    "V","MA","AXP","COF",
-    "WMT","COST","TGT","HD","LOW","MCD","SBUX","NKE",
-    "KO","PEP","PG","CL","KHC",
-    "XOM","CVX","COP","OXY","SLB","HAL","EOG","MPC",
-    "CAT","DE","GE","HON","RTX","BA","LMT","UPS","UNP",
-    "LLY","JNJ","PFE","MRK","ABBV","AMGN",
-    "TMO","DHR","ISRG",
-    "DIS","CMCSA","T","VZ",
-    "DELL","HPQ","IBM",
-    "ETN","EMR","PH","CARR",
-    "MAR","HLT","DAL","UAL","LUV",
-    "ROKU","RBLX","TTD","PINS","SNAP",
-    "CVS","CI","HUM","ELV",
-    "CVNA","DKNG","RBLX",
-    "TENB","ZS","OKTA","FTNT",
-    "MSTR","MARA","RIOT",
-    "APP","AXON","HOUS",
-]
+    try:
+
+        if value is None:
+            return default
+
+        return float(value)
+
+    except Exception:
+
+        return default
 
 
-# ------------------------------------------------------------
+# ============================================================
+# DYNAMIC STOCK UNIVERSE
+# ============================================================
+#
+# Nasdaq Trader's symbol directory contains U.S. traded
+# securities and an ETF flag.
+#
+# We use it to create a much larger universe than the
+# old 136-symbol hard-coded list.
+#
+# ETF = Y is excluded.
+# Test issues are handled gracefully.
+# ============================================================
+
+@st.cache_data(ttl=86400)
+def get_dynamic_stock_universe():
+
+    url = (
+        "https://www.nasdaqtrader.com/"
+        "dynamic/SymDir/nasdaqtraded.txt"
+    )
+
+    try:
+
+        response = requests.get(
+            url,
+            timeout=30
+        )
+
+        if response.status_code != 200:
+            return []
+
+        lines = response.text.splitlines()
+
+        rows = []
+
+        for line in lines:
+
+            if not line:
+                continue
+
+            if line.startswith("Nasdaq Traded"):
+                continue
+
+            if line.startswith("File Creation"):
+                continue
+
+            parts = line.split("|")
+
+            if len(parts) < 8:
+                continue
+
+            symbol = parts[1].strip()
+            security_name = parts[2].strip()
+            market_category = parts[3].strip()
+            test_issue = parts[4].strip()
+            financial_status = parts[5].strip()
+            round_lot = parts[6].strip()
+            etf = parts[7].strip()
+
+            if not symbol:
+                continue
+
+            # Remove test securities
+            if test_issue.upper() == "Y":
+                continue
+
+            # Remove ETFs
+            if etf.upper() == "Y":
+                continue
+
+            # Remove obvious special symbols
+            if "$" in symbol:
+                continue
+
+            if "^" in symbol:
+                continue
+
+            if "/" in symbol:
+                continue
+
+            rows.append({
+                "symbol": symbol,
+                "name": security_name,
+                "market": market_category,
+                "financial_status": financial_status
+            })
+
+        df = pd.DataFrame(rows)
+
+        if df.empty:
+            return []
+
+        # Additional cleanup
+        df = df.drop_duplicates(
+            subset=["symbol"]
+        )
+
+        return df["symbol"].tolist()
+
+    except Exception:
+        return []
+
+
+# ============================================================
 # HISTORICAL DATA
-# ------------------------------------------------------------
+# ============================================================
 
 @st.cache_data(ttl=900)
-def get_history(symbol, days=260):
+def get_history(symbol):
 
     end = datetime.now()
-    start = end - timedelta(days=days)
+    start = end - timedelta(
+        days=HISTORY_DAYS
+    )
 
     data = get_json(
         f"{TRADIER_BASE}/markets/history",
@@ -177,13 +287,15 @@ def get_history(symbol, days=260):
             "interval": "daily",
             "start": start.strftime("%Y-%m-%d"),
             "end": end.strftime("%Y-%m-%d")
-        }
+        },
+        timeout=15
     )
 
     if not data:
         return None
 
     try:
+
         rows = data["history"]["day"]
 
         if not isinstance(rows, list):
@@ -194,13 +306,36 @@ def get_history(symbol, days=260):
         if df.empty:
             return None
 
-        df["date"] = pd.to_datetime(df["date"])
+        df["date"] = pd.to_datetime(
+            df["date"]
+        )
 
-        for col in ["open", "high", "low", "close", "volume"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+        numeric_columns = [
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume"
+        ]
 
-        df = df.dropna(subset=["close"])
-        df = df.sort_values("date").reset_index(drop=True)
+        for column in numeric_columns:
+
+            df[column] = pd.to_numeric(
+                df[column],
+                errors="coerce"
+            )
+
+        df = df.dropna(
+            subset=["close"]
+        )
+
+        df = df.sort_values(
+            "date"
+        )
+
+        df = df.reset_index(
+            drop=True
+        )
 
         return df
 
@@ -208,502 +343,874 @@ def get_history(symbol, days=260):
         return None
 
 
-# ------------------------------------------------------------
+# ============================================================
 # TECHNICAL INDICATORS
-# ------------------------------------------------------------
+# ============================================================
 
 def calculate_indicators(df):
 
     df = df.copy()
 
+    # --------------------------------------------------------
     # EMAs
-    df["ema20"] = df["close"].ewm(
-        span=EMA_FAST,
-        adjust=False
-    ).mean()
+    # --------------------------------------------------------
 
-    df["ema50"] = df["close"].ewm(
-        span=EMA_50,
-        adjust=False
-    ).mean()
+    df["ema20"] = (
+        df["close"]
+        .ewm(
+            span=EMA_FAST,
+            adjust=False
+        )
+        .mean()
+    )
 
-    df["ema100"] = df["close"].ewm(
-        span=EMA_100,
-        adjust=False
-    ).mean()
+    df["ema50"] = (
+        df["close"]
+        .ewm(
+            span=EMA_50,
+            adjust=False
+        )
+        .mean()
+    )
 
+    df["ema100"] = (
+        df["close"]
+        .ewm(
+            span=EMA_100,
+            adjust=False
+        )
+        .mean()
+    )
+
+    # --------------------------------------------------------
     # RSI
+    # --------------------------------------------------------
+
     delta = df["close"].diff()
 
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
+    gain = delta.clip(
+        lower=0
+    )
 
-    avg_gain = gain.ewm(
-        alpha=1 / RSI_LENGTH,
-        adjust=False
-    ).mean()
+    loss = -delta.clip(
+        upper=0
+    )
 
-    avg_loss = loss.ewm(
-        alpha=1 / RSI_LENGTH,
-        adjust=False
-    ).mean()
+    average_gain = (
+        gain
+        .ewm(
+            alpha=1 / RSI_LENGTH,
+            adjust=False
+        )
+        .mean()
+    )
 
-    rs = avg_gain / avg_loss.replace(0, np.nan)
+    average_loss = (
+        loss
+        .ewm(
+            alpha=1 / RSI_LENGTH,
+            adjust=False
+        )
+        .mean()
+    )
 
-    df["rsi"] = 100 - (100 / (1 + rs))
+    rs = (
+        average_gain /
+        average_loss.replace(
+            0,
+            np.nan
+        )
+    )
 
+    df["rsi"] = (
+        100 -
+        (
+            100 /
+            (1 + rs)
+        )
+    )
+
+    # --------------------------------------------------------
     # ATR
-    prev_close = df["close"].shift(1)
+    # --------------------------------------------------------
 
-    tr1 = df["high"] - df["low"]
-    tr2 = abs(df["high"] - prev_close)
-    tr3 = abs(df["low"] - prev_close)
+    previous_close = (
+        df["close"].shift(1)
+    )
 
-    tr = pd.concat(
-        [tr1, tr2, tr3],
+    tr1 = (
+        df["high"] -
+        df["low"]
+    )
+
+    tr2 = abs(
+        df["high"] -
+        previous_close
+    )
+
+    tr3 = abs(
+        df["low"] -
+        previous_close
+    )
+
+    true_range = pd.concat(
+        [
+            tr1,
+            tr2,
+            tr3
+        ],
         axis=1
     ).max(axis=1)
 
-    df["atr"] = tr.rolling(ATR_LENGTH).mean()
+    df["atr"] = (
+        true_range
+        .rolling(
+            ATR_LENGTH
+        )
+        .mean()
+    )
 
-    # Average volume
-    df["avg_volume"] = df["volume"].rolling(20).mean()
+    # --------------------------------------------------------
+    # Volume
+    # --------------------------------------------------------
+
+    df["average_volume"] = (
+        df["volume"]
+        .rolling(20)
+        .mean()
+    )
 
     df["relative_volume"] = (
         df["volume"] /
-        df["avg_volume"].replace(0, np.nan)
+        df["average_volume"]
+        .replace(0, np.nan)
     )
 
-    # Keltner-style bands
-    df["kc_mid"] = df["ema20"]
+    # --------------------------------------------------------
+    # KELTNER
+    # --------------------------------------------------------
 
-    df["kc_upper"] = (
+    df["keltner_mid"] = (
+        df["ema20"]
+    )
+
+    df["keltner_upper"] = (
         df["ema20"] +
         2 * df["atr"]
     )
 
-    df["kc_lower"] = (
+    df["keltner_lower"] = (
         df["ema20"] -
         2 * df["atr"]
     )
 
+    # --------------------------------------------------------
     # Momentum
+    # --------------------------------------------------------
+
     df["momentum_10"] = (
-        df["close"].pct_change(10) * 100
+        df["close"]
+        .pct_change(10)
+        * 100
     )
 
-    # 50/100 EMA crossover
-    df["ema_cross_bull"] = (
+    # --------------------------------------------------------
+    # EMA CROSSOVER
+    # --------------------------------------------------------
+
+    df["bull_cross"] = (
         (df["ema50"] > df["ema100"]) &
-        (df["ema50"].shift(1) <= df["ema100"].shift(1))
+        (
+            df["ema50"].shift(1) <=
+            df["ema100"].shift(1)
+        )
     )
 
-    df["ema_cross_bear"] = (
-        (df["ema50"] < df["ema100"]) &
-        (df["ema50"].shift(1) >= df["ema100"].shift(1))
-    )
+    # --------------------------------------------------------
+    # Sessions since most recent bullish crossover
+    # --------------------------------------------------------
 
-    # Recent crossover
-    df["recent_bull_cross"] = (
-        df["ema_cross_bull"]
-        .rolling(30)
-        .max()
-        .fillna(0)
-        .astype(bool)
-    )
+    cross_positions = np.where(
+        df["bull_cross"].values
+    )[0]
 
-    df["recent_bear_cross"] = (
-        df["ema_cross_bear"]
-        .rolling(30)
-        .max()
-        .fillna(0)
-        .astype(bool)
-    )
+    if len(cross_positions) > 0:
+
+        last_cross_position = (
+            cross_positions[-1]
+        )
+
+        sessions_since_cross = (
+            len(df) -
+            1 -
+            last_cross_position
+        )
+
+        crossover_date = (
+            df.iloc[
+                last_cross_position
+            ]["date"]
+        )
+
+    else:
+
+        sessions_since_cross = None
+        crossover_date = None
+
+    df.attrs[
+        "sessions_since_cross"
+    ] = sessions_since_cross
+
+    df.attrs[
+        "crossover_date"
+    ] = crossover_date
 
     return df
 
 
-# ------------------------------------------------------------
-# CANDLE / PRICE ACTION
-# ------------------------------------------------------------
+# ============================================================
+# CANDLE PATTERN
+# ============================================================
 
-def candle_pattern(df):
+def get_candle_pattern(df):
 
     if len(df) < 3:
         return "None"
 
-    c = df.iloc[-1]
+    current = df.iloc[-1]
+    previous = df.iloc[-2]
 
-    body = abs(c["close"] - c["open"])
-
-    upper_wick = (
-        c["high"] -
-        max(c["open"], c["close"])
+    body = abs(
+        current["close"] -
+        current["open"]
     )
 
-    lower_wick = (
-        min(c["open"], c["close"]) -
-        c["low"]
+    total_range = (
+        current["high"] -
+        current["low"]
     )
-
-    total_range = c["high"] - c["low"]
 
     if total_range <= 0:
         return "None"
 
+    upper_wick = (
+        current["high"] -
+        max(
+            current["open"],
+            current["close"]
+        )
+    )
+
+    lower_wick = (
+        min(
+            current["open"],
+            current["close"]
+        ) -
+        current["low"]
+    )
+
+    # --------------------------------------------------------
     # Bullish engulfing
-    p = df.iloc[-2]
+    # --------------------------------------------------------
 
     if (
-        p["close"] < p["open"] and
-        c["close"] > c["open"] and
-        c["close"] > p["open"] and
-        c["open"] < p["close"]
+        previous["close"] <
+        previous["open"]
+        and
+        current["close"] >
+        current["open"]
+        and
+        current["close"] >
+        previous["open"]
+        and
+        current["open"] <
+        previous["close"]
     ):
         return "Bullish Engulfing"
 
-    # Bearish engulfing
-    if (
-        p["close"] > p["open"] and
-        c["close"] < c["open"] and
-        c["open"] > p["close"] and
-        c["close"] < p["open"]
-    ):
-        return "Bearish Engulfing"
-
+    # --------------------------------------------------------
     # Hammer
+    # --------------------------------------------------------
+
     if (
-        lower_wick > body * 2 and
-        upper_wick < body
+        lower_wick >= body * 2
+        and
+        upper_wick <= body
     ):
         return "Hammer"
 
-    # Shooting star
-    if (
-        upper_wick > body * 2 and
-        lower_wick < body
-    ):
-        return "Shooting Star"
+    # --------------------------------------------------------
+    # Strong bullish candle
+    # --------------------------------------------------------
 
-    # Strong candle
-    if body / total_range > 0.65:
-        if c["close"] > c["open"]:
-            return "Strong Bull Candle"
-        else:
-            return "Strong Bear Candle"
+    if (
+        current["close"] >
+        current["open"]
+        and
+        body / total_range >= 0.65
+    ):
+        return "Strong Bull Candle"
+
+    # --------------------------------------------------------
+    # Bullish inside recovery
+    # --------------------------------------------------------
+
+    if (
+        current["close"] >
+        current["open"]
+        and
+        current["close"] >
+        previous["close"]
+    ):
+        return "Bullish Recovery"
 
     return "Neutral"
 
 
-# ------------------------------------------------------------
+# ============================================================
 # SUPPORT / RESISTANCE
-# ------------------------------------------------------------
+# ============================================================
 
-def support_resistance(df):
+def calculate_support_resistance(df):
 
     recent = df.tail(20)
 
-    support = recent["low"].min()
-    resistance = recent["high"].max()
+    support = safe_float(
+        recent["low"].min()
+    )
+
+    resistance = safe_float(
+        recent["high"].max()
+    )
 
     return support, resistance
 
 
-# ------------------------------------------------------------
-# STOCK SCORING
-# ------------------------------------------------------------
+# ============================================================
+# GOLDEN TECHNICAL ANALYSIS
+# ============================================================
 
-def score_stock(df):
+def analyze_stock(df):
 
-    if df is None or len(df) < 120:
+    if df is None:
         return None
 
-    d = calculate_indicators(df)
+    if len(df) < 120:
+        return None
 
-    last = d.iloc[-1]
+    df = calculate_indicators(df)
 
-    price = safe_float(last["close"])
+    last = df.iloc[-1]
+
+    price = safe_float(
+        last["close"]
+    )
 
     if np.isnan(price):
         return None
 
-    # Price filter
-    if price < MIN_PRICE or price > MAX_PRICE:
+    # --------------------------------------------------------
+    # PRICE FILTER
+    # --------------------------------------------------------
+
+    if price < MIN_PRICE:
         return None
 
-    score_bull = 0
-    score_bear = 0
-
-    reasons_bull = []
-    reasons_bear = []
+    if price > MAX_PRICE:
+        return None
 
     # --------------------------------------------------------
-    # EMA STRUCTURE
+    # REQUIRED RELATIVE VOLUME
     # --------------------------------------------------------
 
-    if last["ema20"] > last["ema50"]:
-        score_bull += 10
-        reasons_bull.append("20 EMA > 50 EMA")
+    relative_volume = safe_float(
+        last["relative_volume"]
+    )
 
-    if last["ema50"] > last["ema100"]:
-        score_bull += 15
-        reasons_bull.append("50 EMA > 100 EMA")
-
-    if last["ema20"] < last["ema50"]:
-        score_bear += 10
-        reasons_bear.append("20 EMA < 50 EMA")
-
-    if last["ema50"] < last["ema100"]:
-        score_bear += 15
-        reasons_bear.append("50 EMA < 100 EMA")
+    if (
+        np.isnan(relative_volume)
+        or
+        relative_volume <
+        MIN_RELATIVE_VOLUME
+    ):
+        return None
 
     # --------------------------------------------------------
-    # RECENT CROSSOVER
+    # BULLISH SCORE
     # --------------------------------------------------------
 
-    if last["recent_bull_cross"]:
-        score_bull += 15
-        reasons_bull.append("50/100 bullish crossover ≤30 sessions")
+    score = 0
 
-    if last["recent_bear_cross"]:
-        score_bear += 15
-        reasons_bear.append("50/100 bearish crossover ≤30 sessions")
+    reasons = []
 
     # --------------------------------------------------------
-    # PRICE ABOVE / BELOW EMA
+    # 20 EMA > 50 EMA
     # --------------------------------------------------------
 
-    if price > last["ema20"]:
-        score_bull += 8
-        reasons_bull.append("Price above 20 EMA")
+    if (
+        last["ema20"] >
+        last["ema50"]
+    ):
+
+        score += 10
+
+        reasons.append(
+            "20 EMA > 50 EMA"
+        )
+
+    # --------------------------------------------------------
+    # 50 EMA > 100 EMA
+    # --------------------------------------------------------
+
+    if (
+        last["ema50"] >
+        last["ema100"]
+    ):
+
+        score += 15
+
+        reasons.append(
+            "50 EMA > 100 EMA"
+        )
+
     else:
-        score_bear += 8
-        reasons_bear.append("Price below 20 EMA")
 
-    if price > last["ema50"]:
-        score_bull += 5
-        reasons_bull.append("Price above 50 EMA")
-    else:
-        score_bear += 5
-        reasons_bear.append("Price below 50 EMA")
+        # We only want bullish setups
+        return None
+
+    # --------------------------------------------------------
+    # RECENT 50/100 CROSS
+    # --------------------------------------------------------
+
+    sessions_since_cross = (
+        df.attrs[
+            "sessions_since_cross"
+        ]
+    )
+
+    crossover_date = (
+        df.attrs[
+            "crossover_date"
+        ]
+    )
+
+    if (
+        sessions_since_cross is not None
+        and
+        sessions_since_cross <=
+        CROSSOVER_LOOKBACK
+    ):
+
+        score += 15
+
+        reasons.append(
+            "50/100 bullish crossover "
+            f"within {CROSSOVER_LOOKBACK} sessions"
+        )
+
+    # --------------------------------------------------------
+    # PRICE ABOVE 20 EMA
+    # --------------------------------------------------------
+
+    if (
+        price >
+        last["ema20"]
+    ):
+
+        score += 8
+
+        reasons.append(
+            "Price above 20 EMA"
+        )
+
+    # --------------------------------------------------------
+    # PRICE ABOVE 50 EMA
+    # --------------------------------------------------------
+
+    if (
+        price >
+        last["ema50"]
+    ):
+
+        score += 5
+
+        reasons.append(
+            "Price above 50 EMA"
+        )
 
     # --------------------------------------------------------
     # RSI
     # --------------------------------------------------------
 
-    rsi = safe_float(last["rsi"])
+    rsi = safe_float(
+        last["rsi"]
+    )
 
     if not np.isnan(rsi):
 
         if 50 <= rsi <= 70:
-            score_bull += 10
-            reasons_bull.append(f"RSI bullish ({rsi:.1f})")
 
-        elif 30 <= rsi < 50:
-            score_bear += 7
-            reasons_bear.append(f"RSI bearish ({rsi:.1f})")
+            score += 10
+
+            reasons.append(
+                f"RSI bullish ({rsi:.1f})"
+            )
+
+        elif 45 <= rsi < 50:
+
+            score += 4
+
+            reasons.append(
+                f"RSI improving ({rsi:.1f})"
+            )
 
         elif rsi > 70:
-            score_bull += 4
-            reasons_bull.append(f"RSI strong ({rsi:.1f})")
 
-        elif rsi < 30:
-            score_bear += 4
-            reasons_bear.append(f"RSI weak ({rsi:.1f})")
+            score += 4
+
+            reasons.append(
+                f"RSI strong ({rsi:.1f})"
+            )
 
     # --------------------------------------------------------
     # RELATIVE VOLUME
     # --------------------------------------------------------
 
-    rv = safe_float(last["relative_volume"])
+    if relative_volume >= 1.5:
 
-    if not np.isnan(rv):
+        score += 10
 
-        if rv >= MIN_REL_VOLUME:
-            score_bull += 8
-            score_bear += 8
+        reasons.append(
+            f"Strong relative volume "
+            f"({relative_volume:.2f}x)"
+        )
+
+    elif relative_volume >= 1.2:
+
+        score += 6
+
+        reasons.append(
+            f"Relative volume "
+            f"({relative_volume:.2f}x)"
+        )
 
     # --------------------------------------------------------
     # MOMENTUM
     # --------------------------------------------------------
 
-    momentum = safe_float(last["momentum_10"])
+    momentum = safe_float(
+        last["momentum_10"]
+    )
 
     if not np.isnan(momentum):
 
-        if momentum > 3:
-            score_bull += 10
-            reasons_bull.append(
+        if momentum >= 5:
+
+            score += 10
+
+            reasons.append(
                 f"10-day momentum +{momentum:.1f}%"
             )
 
-        elif momentum < -3:
-            score_bear += 10
-            reasons_bear.append(
-                f"10-day momentum {momentum:.1f}%"
+        elif momentum >= 2:
+
+            score += 6
+
+            reasons.append(
+                f"10-day momentum +{momentum:.1f}%"
+            )
+
+        elif momentum > 0:
+
+            score += 3
+
+            reasons.append(
+                f"Positive momentum +{momentum:.1f}%"
             )
 
     # --------------------------------------------------------
     # KELTNER
     # --------------------------------------------------------
 
-    if price > last["kc_mid"]:
-        score_bull += 5
-        reasons_bull.append("Keltner bullish")
+    if (
+        price >
+        last["keltner_mid"]
+    ):
 
-    if price < last["kc_mid"]:
-        score_bear += 5
-        reasons_bear.append("Keltner bearish")
+        score += 5
+
+        reasons.append(
+            "Keltner bullish"
+        )
 
     # --------------------------------------------------------
     # PRICE ACTION
     # --------------------------------------------------------
 
-    pattern = candle_pattern(d)
+    pattern = get_candle_pattern(
+        df
+    )
 
-    if "Bull" in pattern or pattern == "Hammer":
-        score_bull += 7
-        reasons_bull.append(pattern)
+    if pattern in [
+        "Bullish Engulfing",
+        "Hammer",
+        "Strong Bull Candle"
+    ]:
 
-    if "Bear" in pattern or pattern == "Shooting Star":
-        score_bear += 7
-        reasons_bear.append(pattern)
+        score += 7
+
+        reasons.append(
+            pattern
+        )
+
+    elif pattern == "Bullish Recovery":
+
+        score += 4
+
+        reasons.append(
+            pattern
+        )
 
     # --------------------------------------------------------
     # SUPPORT / RESISTANCE
     # --------------------------------------------------------
 
-    support, resistance = support_resistance(d)
-
-    distance_to_resistance = (
-        (resistance - price) / price * 100
+    support, resistance = (
+        calculate_support_resistance(
+            df
+        )
     )
 
-    distance_to_support = (
-        (price - support) / price * 100
-    )
+    if (
+        not np.isnan(resistance)
+        and
+        resistance > price
+    ):
 
-    if 0 <= distance_to_resistance <= 5:
-        score_bull += 5
-        reasons_bull.append("Near breakout resistance")
+        distance_to_resistance = (
+            (
+                resistance -
+                price
+            )
+            /
+            price
+            *
+            100
+        )
 
-    if 0 <= distance_to_support <= 5:
-        score_bear += 5
-        reasons_bear.append("Near breakdown support")
-
-    # --------------------------------------------------------
-    # DIRECTION
-    # --------------------------------------------------------
-
-    if score_bull >= score_bear:
-        direction = "BULLISH"
-        score = score_bull
-        reasons = reasons_bull
     else:
-        direction = "BEARISH"
-        score = score_bear
-        reasons = reasons_bear
+
+        distance_to_resistance = 0
+
+    # Near breakout resistance
+    if (
+        0 <=
+        distance_to_resistance <=
+        5
+    ):
+
+        score += 5
+
+        reasons.append(
+            "Near breakout resistance"
+        )
 
     # --------------------------------------------------------
-    # CONFIDENCE
+    # CONFLUENCE COUNT
     # --------------------------------------------------------
 
-    if score >= 80:
-        confidence = "A+"
-    elif score >= 70:
-        confidence = "A"
-    elif score >= 60:
-        confidence = "B"
-    elif score >= 50:
-        confidence = "C"
-    else:
-        confidence = "PASS"
+    confluence_count = 0
+
+    confluence_keywords = [
+        "EMA",
+        "crossover",
+        "RSI",
+        "volume",
+        "momentum",
+        "Keltner",
+        "Bullish",
+        "Hammer",
+        "resistance"
+    ]
+
+    for reason in reasons:
+
+        if any(
+            keyword.lower()
+            in reason.lower()
+            for keyword in confluence_keywords
+        ):
+
+            confluence_count += 1
 
     # --------------------------------------------------------
     # SETUP
     # --------------------------------------------------------
 
-    if direction == "BULLISH":
+    if (
+        sessions_since_cross is not None
+        and
+        sessions_since_cross <=
+        CROSSOVER_LOOKBACK
+        and
+        price >
+        last["ema20"]
+    ):
 
-        if last["ema50"] > last["ema100"] and last["recent_bull_cross"]:
-            setup = "Golden Trend / Pullback"
+        setup = (
+            "Bull Trend Pullback"
+        )
 
-        elif price > resistance * 0.995:
-            setup = "Breakout Watch"
+    elif (
+        price >=
+        resistance * 0.995
+    ):
 
-        elif price > last["ema20"]:
-            setup = "Momentum Continuation"
+        setup = (
+            "Breakout Setup"
+        )
 
-        else:
-            setup = "Bullish Reversal"
+    elif (
+        momentum > 3
+        and
+        price >
+        last["ema20"]
+    ):
+
+        setup = (
+            "Momentum Continuation"
+        )
+
+    elif (
+        pattern in [
+            "Bullish Engulfing",
+            "Hammer"
+        ]
+    ):
+
+        setup = (
+            "Bullish Reversal"
+        )
 
     else:
 
-        if last["ema50"] < last["ema100"] and last["recent_bear_cross"]:
-            setup = "Death Trend / Rally"
-
-        elif price < support * 1.005:
-            setup = "Breakdown Watch"
-
-        elif price < last["ema20"]:
-            setup = "Momentum Continuation"
-
-        else:
-            setup = "Bearish Reversal"
+        setup = (
+            "Bullish Trend"
+        )
 
     # --------------------------------------------------------
-    # STOP / TARGET
+    # CONFIDENCE
     # --------------------------------------------------------
 
-    atr = safe_float(last["atr"])
+    if score >= 85:
+        confidence = "A+"
 
-    if np.isnan(atr) or atr <= 0:
+    elif score >= 75:
+        confidence = "A"
+
+    elif score >= 65:
+        confidence = "B+"
+
+    elif score >= 60:
+        confidence = "B"
+
+    else:
+        confidence = "PASS"
+
+    # --------------------------------------------------------
+    # TECHNICAL STOP / TARGET
+    # --------------------------------------------------------
+
+    atr = safe_float(
+        last["atr"]
+    )
+
+    if (
+        np.isnan(atr)
+        or
+        atr <= 0
+    ):
+
         atr = price * 0.03
 
-    if direction == "BULLISH":
+    stop = (
+        price -
+        1.20 * atr
+    )
 
-        stop = price - 1.2 * atr
-        target = price + 1.5 * (price - stop)
+    risk = (
+        price -
+        stop
+    )
 
-    else:
+    target = (
+        price +
+        1.50 * risk
+    )
 
-        stop = price + 1.2 * atr
-        target = price - 1.5 * (stop - price)
+    risk_percent = (
+        risk /
+        price *
+        100
+    )
 
-    risk_pct = abs(price - stop) / price * 100
+    # --------------------------------------------------------
+    # FINAL RESULT
+    # --------------------------------------------------------
 
     return {
-        "price": price,
-        "direction": direction,
-        "score": score,
-        "confidence": confidence,
-        "setup": setup,
-        "crossover_date": (
-            d.loc[d["ema_cross_bull"], "date"].iloc[-1]
-            if direction == "BULLISH"
-            and d["ema_cross_bull"].any()
-            else
-            d.loc[d["ema_cross_bear"], "date"].iloc[-1]
-            if direction == "BEARISH"
-            and d["ema_cross_bear"].any()
+
+        "Price": price,
+
+        "Direction": "BULLISH",
+
+        "Score": int(score),
+
+        "Confidence": confidence,
+
+        "Setup": setup,
+
+        "Crossover Date": (
+            crossover_date
+            if crossover_date is not None
             else None
         ),
-        "relative_volume": rv,
-        "rsi": rsi,
-        "momentum": momentum,
-        "support": support,
-        "resistance": resistance,
-        "pattern": pattern,
-        "stop": stop,
-        "target": target,
-        "risk_pct": risk_pct,
-        "reasons": reasons
+
+        "Sessions Since Cross": (
+            sessions_since_cross
+            if sessions_since_cross is not None
+            else "—"
+        ),
+
+        "Relative Volume": relative_volume,
+
+        "RSI": rsi,
+
+        "Momentum %": momentum,
+
+        "Price Action": pattern,
+
+        "Confluence": confluence_count,
+
+        "Support": support,
+
+        "Resistance": resistance,
+
+        "Stop": stop,
+
+        "Target": target,
+
+        "Risk %": risk_percent,
+
+        "Reasons": " • ".join(
+            reasons
+        )
     }
 
 
-# ------------------------------------------------------------
-# OPTION CHAIN
-# ------------------------------------------------------------
+# ============================================================
+# OPTION EXPIRATIONS
+# ============================================================
 
 @st.cache_data(ttl=300)
 def get_option_expirations(symbol):
@@ -721,19 +1228,36 @@ def get_option_expirations(symbol):
         return []
 
     try:
-        dates = data["expirations"]["date"]
 
-        if isinstance(dates, str):
+        dates = (
+            data[
+                "expirations"
+            ]["date"]
+        )
+
+        if isinstance(
+            dates,
+            str
+        ):
+
             dates = [dates]
 
         return dates
 
     except Exception:
+
         return []
 
 
+# ============================================================
+# OPTION CHAIN
+# ============================================================
+
 @st.cache_data(ttl=300)
-def get_option_chain(symbol, expiration):
+def get_option_chain(
+    symbol,
+    expiration
+):
 
     data = get_json(
         f"{TRADIER_BASE}/markets/options/chains",
@@ -749,55 +1273,98 @@ def get_option_chain(symbol, expiration):
 
     try:
 
-        options = data["options"]["option"]
+        options = (
+            data[
+                "options"
+            ]["option"]
+        )
 
-        if not isinstance(options, list):
+        if not isinstance(
+            options,
+            list
+        ):
+
             options = [options]
 
-        return pd.DataFrame(options)
+        df = pd.DataFrame(
+            options
+        )
+
+        return df
 
     except Exception:
+
         return None
 
 
-# ------------------------------------------------------------
-# HUGHES 1% RULE
-# ------------------------------------------------------------
+# ============================================================
+# CALL INTRINSIC VALUE
+# ============================================================
 
-def option_time_value(
-    option_price,
+def call_intrinsic_value(
     underlying_price,
-    strike,
-    option_type
+    strike
 ):
 
-    if option_type == "call":
-        intrinsic = max(
-            underlying_price - strike,
-            0
-        )
-
-    else:
-        intrinsic = max(
-            strike - underlying_price,
-            0
-        )
-
     return max(
-        option_price - intrinsic,
+        underlying_price -
+        strike,
         0
     )
 
 
-def select_option(
+# ============================================================
+# HUGHES 1% RULE
+# ============================================================
+
+def passes_hughes_rule(
+    underlying_price,
+    option_mid,
+    strike
+):
+
+    intrinsic = (
+        call_intrinsic_value(
+            underlying_price,
+            strike
+        )
+    )
+
+    time_value = max(
+        option_mid -
+        intrinsic,
+        0
+    )
+
+    maximum_time_value = (
+        underlying_price *
+        HUGHES_TIME_VALUE_LIMIT
+    )
+
+    return (
+        time_value <=
+        maximum_time_value
+    )
+
+
+# ============================================================
+# SELECT CALL
+# ============================================================
+
+def find_best_call(
     symbol,
     stock_data
 ):
 
-    price = stock_data["price"]
-    direction = stock_data["direction"]
+    underlying_price = (
+        stock_data["Price"]
+    )
 
-    expirations = get_option_expirations(symbol)
+    expirations = (
+        get_option_expirations(
+            symbol
+        )
+    )
 
     if not expirations:
         return None
@@ -806,658 +1373,1462 @@ def select_option(
 
     candidates = []
 
-    for exp in expirations:
+    for expiration in expirations:
 
         try:
-            exp_date = datetime.strptime(
-                exp,
-                "%Y-%m-%d"
-            ).date()
+
+            expiration_date = (
+                datetime.strptime(
+                    expiration,
+                    "%Y-%m-%d"
+                ).date()
+            )
+
         except Exception:
+
             continue
 
-        dte = (exp_date - today).days
+        dte = (
+            expiration_date -
+            today
+        ).days
 
-        if dte < OPTION_DTE_MIN:
+        if (
+            dte <
+            OPTION_DTE_MIN
+        ):
+
             continue
 
-        if dte > OPTION_DTE_MAX:
+        if (
+            dte >
+            OPTION_DTE_MAX
+        ):
+
             continue
 
-        chain = get_option_chain(
-            symbol,
-            exp
+        chain = (
+            get_option_chain(
+                symbol,
+                expiration
+            )
         )
 
-        if chain is None or chain.empty:
+        if (
+            chain is None
+            or
+            chain.empty
+        ):
+
             continue
 
-        option_type = (
-            "call"
-            if direction == "BULLISH"
-            else "put"
-        )
+        # ----------------------------------------------------
+        # CALLS ONLY
+        # ----------------------------------------------------
 
         chain = chain[
-            chain["option_type"] == option_type
+            chain["option_type"]
+            .astype(str)
+            .str.lower()
+            ==
+            "call"
         ].copy()
 
         if chain.empty:
             continue
 
-        chain["strike"] = pd.to_numeric(
-            chain["strike"],
-            errors="coerce"
-        )
+        # ----------------------------------------------------
+        # Numeric conversion
+        # ----------------------------------------------------
 
-        chain["bid"] = pd.to_numeric(
-            chain["bid"],
-            errors="coerce"
-        )
+        for column in [
+            "strike",
+            "bid",
+            "ask"
+        ]:
 
-        chain["ask"] = pd.to_numeric(
-            chain["ask"],
-            errors="coerce"
-        )
+            chain[column] = (
+                pd.to_numeric(
+                    chain[column],
+                    errors="coerce"
+                )
+            )
 
         chain = chain.dropna(
-            subset=["strike", "bid", "ask"]
+            subset=[
+                "strike",
+                "bid",
+                "ask"
+            ]
         )
 
-        # Avoid absurdly wide spreads
+        if chain.empty:
+            continue
+
+        # ----------------------------------------------------
+        # Valid markets only
+        # ----------------------------------------------------
+
+        chain = chain[
+            (chain["bid"] > 0) &
+            (chain["ask"] > 0) &
+            (chain["ask"] >= chain["bid"])
+        ]
+
+        if chain.empty:
+            continue
+
         chain["mid"] = (
             chain["bid"] +
             chain["ask"]
         ) / 2
 
+        # ----------------------------------------------------
+        # We focus on ATM to modestly OTM calls.
+        #
+        # We do NOT want the algorithm choosing ridiculous
+        # deep-ITM calls like the HD example.
+        # ----------------------------------------------------
+
+        lower_strike = (
+            underlying_price *
+            0.98
+        )
+
+        upper_strike = (
+            underlying_price *
+            1.08
+        )
+
         chain = chain[
-            chain["mid"] > 0
+            (chain["strike"] >= lower_strike) &
+            (chain["strike"] <= upper_strike)
         ]
 
         if chain.empty:
             continue
 
         # ----------------------------------------------------
-        # Strike selection
-        #
-        # Slightly OTM / near ATM.
+        # Evaluate contracts
         # ----------------------------------------------------
 
-        if direction == "BULLISH":
+        for _, option in chain.iterrows():
 
-            chain["distance"] = abs(
-                chain["strike"] - price * 1.03
+            strike = safe_float(
+                option["strike"]
             )
 
-        else:
-
-            chain["distance"] = abs(
-                chain["strike"] - price * 0.97
+            bid = safe_float(
+                option["bid"]
             )
 
-        chain = chain.sort_values("distance")
-
-        for _, row in chain.head(12).iterrows():
-
-            strike = row["strike"]
-            mid = row["mid"]
-
-            tv = option_time_value(
-                mid,
-                price,
-                strike,
-                option_type
+            ask = safe_float(
+                option["ask"]
             )
 
-            max_tv = price * ONE_PERCENT_RULE
+            mid = safe_float(
+                option["mid"]
+            )
 
+            if (
+                np.isnan(strike)
+                or
+                np.isnan(mid)
+                or
+                mid <= 0
+            ):
+
+                continue
+
+            spread = (
+                ask -
+                bid
+            )
+
+            spread_percent = (
+                spread /
+                mid *
+                100
+            )
+
+            if (
+                spread_percent >
+                MAX_OPTION_SPREAD_PERCENT
+            ):
+
+                continue
+
+            intrinsic = (
+                call_intrinsic_value(
+                    underlying_price,
+                    strike
+                )
+            )
+
+            time_value = max(
+                mid -
+                intrinsic,
+                0
+            )
+
+            maximum_time_value = (
+                underlying_price *
+                HUGHES_TIME_VALUE_LIMIT
+            )
+
+            # ------------------------------------------------
             # Hughes rule
-            if tv > max_tv:
+            # ------------------------------------------------
+
+            if (
+                time_value >
+                maximum_time_value
+            ):
+
                 continue
 
-            spread = row["ask"] - row["bid"]
+            # ------------------------------------------------
+            # Prefer ATM / slightly OTM
+            # ------------------------------------------------
 
-            spread_pct = (
-                spread / mid * 100
-                if mid > 0
-                else 999
+            strike_distance = (
+                abs(
+                    strike -
+                    underlying_price
+                )
+                /
+                underlying_price
             )
-
-            if spread_pct > 25:
-                continue
 
             candidates.append({
-                "symbol": symbol,
-                "expiration": exp,
-                "dte": dte,
-                "type": option_type,
-                "strike": strike,
-                "bid": row["bid"],
-                "ask": row["ask"],
-                "mid": mid,
-                "intrinsic": (
-                    max(price - strike, 0)
-                    if option_type == "call"
-                    else
-                    max(strike - price, 0)
+
+                "Expiration": expiration,
+
+                "DTE": dte,
+
+                "Type": "CALL",
+
+                "Strike": strike,
+
+                "Bid": bid,
+
+                "Ask": ask,
+
+                "Mid": mid,
+
+                "Intrinsic": intrinsic,
+
+                "Time Value": time_value,
+
+                "Max Time Value": (
+                    maximum_time_value
                 ),
-                "time_value": tv,
-                "max_time_value": max_tv,
-                "spread_pct": spread_pct
+
+                "Spread %": spread_percent,
+
+                "Strike Distance": (
+                    strike_distance
+                )
             })
 
     if not candidates:
         return None
 
-    # Prefer lowest time value and reasonable DTE
+    # --------------------------------------------------------
+    # Rank contracts
+    #
+    # First priority:
+    #   Hughes time value
+    #
+    # Second:
+    #   near ATM
+    #
+    # Third:
+    #   around 30 DTE
+    # --------------------------------------------------------
+
     candidates.sort(
         key=lambda x: (
-            x["time_value"] / price,
-            abs(x["dte"] - 30),
-            x["spread_pct"]
+            x["Time Value"] /
+            max(
+                x["Max Time Value"],
+                0.0001
+            ),
+
+            x["Strike Distance"],
+
+            abs(
+                x["DTE"] -
+                30
+            ),
+
+            x["Spread %"]
         )
     )
 
     return candidates[0]
 
 
-# ------------------------------------------------------------
+# ============================================================
 # OPTION TRADE PLAN
-# ------------------------------------------------------------
+# ============================================================
 
-def build_option_trade(stock, option):
+def build_call_trade(
+    stock,
+    option
+):
 
     if option is None:
         return None
 
-    price = stock["price"]
-    direction = stock["direction"]
+    entry = (
+        option["Ask"]
+    )
 
-    entry = option["ask"]
+    if (
+        np.isnan(entry)
+        or
+        entry <= 0
+    ):
 
-    if entry <= 0:
-        entry = option["mid"]
+        entry = (
+            option["Mid"]
+        )
 
-    # Option stop around 45% loss
-    stop = entry * 0.55
+    # --------------------------------------------------------
+    # Defined option stop
+    # --------------------------------------------------------
 
-    # Target based on stock setup
-    target = entry * 1.50
+    stop = (
+        entry *
+        0.55
+    )
 
-    max_risk_dollars = entry * 100
+    # --------------------------------------------------------
+    # 1.5R option target
+    # --------------------------------------------------------
+
+    risk = (
+        entry -
+        stop
+    )
+
+    target = (
+        entry +
+        1.50 * risk
+    )
+
+    risk_dollars = (
+        risk * 100
+    )
 
     reward_dollars = (
-        target - entry
+        target -
+        entry
     ) * 100
 
     rr = (
         reward_dollars /
-        max_risk_dollars
-        if max_risk_dollars > 0
+        risk_dollars
+        if risk_dollars > 0
         else 0
     )
 
-    action = (
-        "BUY CALL"
-        if direction == "BULLISH"
-        else
-        "BUY PUT"
-    )
-
     return {
-        "action": action,
-        "entry": entry,
-        "stop": stop,
-        "target": target,
-        "risk_per_contract": max_risk_dollars,
-        "reward_per_contract": reward_dollars,
-        "rr": rr
+
+        "Entry": entry,
+
+        "Stop": stop,
+
+        "Target": target,
+
+        "Risk / Contract": (
+            risk_dollars
+        ),
+
+        "Reward / Contract": (
+            reward_dollars
+        ),
+
+        "R:R": rr
     }
 
 
-# ------------------------------------------------------------
-# STOCK SCANNER
-# ------------------------------------------------------------
+# ============================================================
+# PHASE 1 SCANNER
+# ============================================================
 
-def run_stock_scan():
+def run_golden_scan():
+
+    universe = (
+        get_dynamic_stock_universe()
+    )
+
+    if not universe:
+        return pd.DataFrame(), 0
 
     results = []
 
-    progress = st.progress(0)
+    progress = st.progress(
+        0
+    )
 
-    total = len(STOCK_UNIVERSE)
+    status = st.empty()
 
-    for i, symbol in enumerate(STOCK_UNIVERSE):
+    total = len(
+        universe
+    )
 
-        df = get_history(symbol)
+    for index, symbol in enumerate(
+        universe
+    ):
 
-        if df is None:
-            progress.progress(
-                min((i + 1) / total, 1.0)
-            )
-            continue
-
-        if len(df) < 120:
-            continue
-
-        last_price = safe_float(
-            df.iloc[-1]["close"]
+        status.write(
+            f"Scanning {index + 1:,} "
+            f"of {total:,}: {symbol}"
         )
 
-        # Price filter
-        if (
-            np.isnan(last_price)
-            or last_price < MIN_PRICE
-            or last_price > MAX_PRICE
-        ):
+        df = get_history(
+            symbol
+        )
+
+        if df is None:
+
+            progress.progress(
+                min(
+                    (index + 1) /
+                    total,
+                    1.0
+                )
+            )
+
             continue
 
-        analysis = score_stock(df)
+        analysis = (
+            analyze_stock(
+                df
+            )
+        )
 
         if analysis is None:
+
+            progress.progress(
+                min(
+                    (index + 1) /
+                    total,
+                    1.0
+                )
+            )
+
             continue
 
-        if analysis["score"] < MIN_SCORE:
-            continue
-
-        # Relative volume requirement
-        rv = analysis["relative_volume"]
+        # ----------------------------------------------------
+        # Minimum Golden score
+        # ----------------------------------------------------
 
         if (
-            not np.isnan(rv)
-            and rv < MIN_REL_VOLUME
+            analysis["Score"] <
+            MIN_SCORE
         ):
+
+            progress.progress(
+                min(
+                    (index + 1) /
+                    total,
+                    1.0
+                )
+            )
+
             continue
 
         results.append({
+
             "Ticker": symbol,
-            "Price": analysis["price"],
-            "Direction": analysis["direction"],
-            "Score": analysis["score"],
-            "Confidence": analysis["confidence"],
-            "Setup": analysis["setup"],
-            "Crossover": (
-                analysis["crossover_date"].strftime("%Y-%m-%d")
-                if analysis["crossover_date"] is not None
-                else "—"
+
+            "Price": analysis["Price"],
+
+            "Direction": (
+                analysis["Direction"]
             ),
-            "RV": analysis["relative_volume"],
-            "RSI": analysis["rsi"],
-            "Momentum %": analysis["momentum"],
-            "Price Action": analysis["pattern"],
-            "Support": analysis["support"],
-            "Resistance": analysis["resistance"],
-            "Stop": analysis["stop"],
-            "Target": analysis["target"],
-            "Risk %": analysis["risk_pct"],
-            "Reasons": " • ".join(
-                analysis["reasons"]
+
+            "Score": (
+                analysis["Score"]
+            ),
+
+            "Confidence": (
+                analysis["Confidence"]
+            ),
+
+            "Setup": (
+                analysis["Setup"]
+            ),
+
+            "Crossover Date": (
+                analysis["Crossover Date"]
+            ),
+
+            "Sessions Since Cross": (
+                analysis[
+                    "Sessions Since Cross"
+                ]
+            ),
+
+            "Relative Volume": (
+                analysis[
+                    "Relative Volume"
+                ]
+            ),
+
+            "RSI": (
+                analysis["RSI"]
+            ),
+
+            "Momentum %": (
+                analysis["Momentum %"]
+            ),
+
+            "Price Action": (
+                analysis["Price Action"]
+            ),
+
+            "Confluence": (
+                analysis["Confluence"]
+            ),
+
+            "Support": (
+                analysis["Support"]
+            ),
+
+            "Resistance": (
+                analysis["Resistance"]
+            ),
+
+            "Stop": (
+                analysis["Stop"]
+            ),
+
+            "Target": (
+                analysis["Target"]
+            ),
+
+            "Risk %": (
+                analysis["Risk %"]
+            ),
+
+            "Reasons": (
+                analysis["Reasons"]
             )
         })
 
         progress.progress(
-            min((i + 1) / total, 1.0)
+            min(
+                (index + 1) /
+                total,
+                1.0
+            )
         )
 
+    status.empty()
     progress.empty()
 
     if not results:
-        return pd.DataFrame()
 
-    result_df = pd.DataFrame(results)
+        return (
+            pd.DataFrame(),
+            len(universe)
+        )
 
-    result_df = result_df.sort_values(
-        ["Score", "RV"],
-        ascending=[False, False]
+    result_df = (
+        pd.DataFrame(
+            results
+        )
+        .sort_values(
+            [
+                "Score",
+                "Relative Volume",
+                "Confluence"
+            ],
+            ascending=[
+                False,
+                False,
+                False
+            ]
+        )
+        .reset_index(
+            drop=True
+        )
     )
 
-    return result_df.reset_index(drop=True)
+    return (
+        result_df,
+        len(universe)
+    )
 
 
-# ------------------------------------------------------------
-# UI
-# ------------------------------------------------------------
+# ============================================================
+# UI — UNIVERSE
+# ============================================================
 
 st.divider()
 
-col1, col2, col3 = st.columns(3)
-
-with col1:
-    st.metric(
-        "Universe",
-        f"{len(STOCK_UNIVERSE)} stocks"
-    )
-
-with col2:
-    st.metric(
-        "Price Floor",
-        f"${MIN_PRICE:.0f}"
-    )
-
-with col3:
-    st.metric(
-        "Min Relative Volume",
-        f"{MIN_REL_VOLUME:.1f}x"
-    )
-
-
-st.subheader("Phase 1 — Golden Technical Scan")
-
-st.write(
-    "Finds individual stocks with trend, momentum, "
-    "EMA structure, recent 50/100 crossover, "
-    "relative volume and price-action confluence."
+universe = (
+    get_dynamic_stock_universe()
 )
 
-run_scan = st.button(
+u1, u2, u3, u4 = st.columns(4)
+
+with u1:
+
+    st.metric(
+        "Dynamic Universe",
+        f"{len(universe):,}"
+    )
+
+with u2:
+
+    st.metric(
+        "Price",
+        "$10+"
+    )
+
+with u3:
+
+    st.metric(
+        "Min Rel. Volume",
+        "1.20x"
+    )
+
+with u4:
+
+    st.metric(
+        "Option Strategy",
+        "CALLS ONLY"
+    )
+
+
+st.info(
+    "The universe is dynamically built from U.S. "
+    "exchange-listed securities with ETFs removed. "
+    "Phase 1 finds bullish technical candidates first; "
+    "Phase 2 verifies the option chain only for stocks "
+    "you select."
+)
+
+
+# ============================================================
+# PHASE 1
+# ============================================================
+
+st.header(
+    "Phase 1 — Golden Technical Scan"
+)
+
+st.write(
+    "Find the strongest bullish swing candidates "
+    "using EMA structure, recent 50/100 crossover, "
+    "relative volume, momentum, Keltner position, "
+    "price action and support/resistance."
+)
+
+
+if st.button(
     "🏆 RUN GOLDEN SCAN",
     type="primary",
     use_container_width=True
-)
-
-
-if run_scan:
+):
 
     with st.spinner(
-        "Scanning the Golden universe..."
+        "Scanning the expanded stock universe..."
     ):
 
-        results = run_stock_scan()
+        results, universe_count = (
+            run_golden_scan()
+        )
 
-        st.session_state.scan_results = results
+        st.session_state.scan_results = (
+            results
+        )
 
-        # Reset options
-        st.session_state.option_results = {}
+        st.session_state.selected_tickers = []
+
+        st.session_state.option_results = None
 
 
-# ------------------------------------------------------------
-# DISPLAY RESULTS
-# ------------------------------------------------------------
+# ============================================================
+# DISPLAY PHASE 1
+# ============================================================
 
-results = st.session_state.scan_results
+results = (
+    st.session_state.scan_results
+)
+
 
 if results is not None:
 
     st.divider()
 
-    st.subheader(
-        f"Phase 1 Results — {len(results)} Candidates"
-    )
-
     if results.empty:
 
         st.warning(
-            "No stocks currently meet the Golden Scanner filters."
+            "No bullish Golden candidates passed "
+            "the current filters."
         )
 
     else:
 
-        display_cols = [
+        st.subheader(
+            f"🏆 {len(results)} Golden Candidates"
+        )
+
+        st.success(
+            "Select the stocks you want to investigate "
+            "with the CALL options engine."
+        )
+
+        # ----------------------------------------------------
+        # Selection UI
+        # ----------------------------------------------------
+
+        st.write(
+            "### ☑️ Select candidates for Phase 2"
+        )
+
+        selected = []
+
+        for index, row in results.iterrows():
+
+            ticker = row["Ticker"]
+
+            label = (
+                f"{ticker}  |  "
+                f"Score {row['Score']}  |  "
+                f"{row['Setup']}  |  "
+                f"${row['Price']:.2f}"
+            )
+
+            checked = st.checkbox(
+                label,
+                key=f"select_{ticker}"
+            )
+
+            if checked:
+
+                selected.append(
+                    ticker
+                )
+
+        st.session_state.selected_tickers = (
+            selected
+        )
+
+        # ----------------------------------------------------
+        # Selected count
+        # ----------------------------------------------------
+
+        st.info(
+            f"{len(selected)} stock(s) selected "
+            "for Phase 2."
+        )
+
+        # ----------------------------------------------------
+        # Main technical table
+        # ----------------------------------------------------
+
+        st.divider()
+
+        st.subheader(
+            "Golden Technical Candidates"
+        )
+
+        display_columns = [
+
             "Ticker",
+
             "Price",
+
             "Direction",
+
             "Score",
+
             "Confidence",
+
             "Setup",
-            "Crossover",
-            "RV",
+
+            "Crossover Date",
+
+            "Sessions Since Cross",
+
+            "Relative Volume",
+
             "RSI",
+
             "Momentum %",
+
             "Price Action",
+
+            "Confluence",
+
+            "Support",
+
+            "Resistance",
+
             "Stop",
-            "Target",
-            "Risk %"
+
+            "Target"
         ]
 
+        display_df = (
+            results[
+                display_columns
+            ].copy()
+        )
+
+        # Formatting
+        for column in [
+            "Price",
+            "Support",
+            "Resistance",
+            "Stop",
+            "Target"
+        ]:
+
+            display_df[column] = (
+                display_df[column]
+                .apply(
+                    lambda x:
+                    f"${x:.2f}"
+                    if pd.notna(x)
+                    else "—"
+                )
+            )
+
+        display_df["Relative Volume"] = (
+            display_df[
+                "Relative Volume"
+            ].apply(
+                lambda x:
+                f"{x:.2f}x"
+                if pd.notna(x)
+                else "—"
+            )
+        )
+
+        display_df["RSI"] = (
+            display_df[
+                "RSI"
+            ].apply(
+                lambda x:
+                f"{x:.1f}"
+                if pd.notna(x)
+                else "—"
+            )
+        )
+
+        display_df["Momentum %"] = (
+            display_df[
+                "Momentum %"
+            ].apply(
+                lambda x:
+                f"{x:.1f}%"
+                if pd.notna(x)
+                else "—"
+            )
+        )
+
         st.dataframe(
-            results[display_cols],
+            display_df,
             use_container_width=True,
             hide_index=True
         )
 
-        st.divider()
-
         # ----------------------------------------------------
-        # SELECT STOCK
+        # Detailed selected candidates
         # ----------------------------------------------------
 
-        tickers = results["Ticker"].tolist()
-
-        selected = st.selectbox(
-            "Select a Golden candidate for Phase 2:",
-            tickers
-        )
-
-        selected_row = results[
-            results["Ticker"] == selected
-        ].iloc[0]
-
-        st.subheader(
-            f"🎯 {selected} — Golden Trade Candidate"
-        )
-
-        c1, c2, c3, c4 = st.columns(4)
-
-        with c1:
-            st.metric(
-                "Price",
-                f"${selected_row['Price']:.2f}"
-            )
-
-        with c2:
-            st.metric(
-                "Direction",
-                selected_row["Direction"]
-            )
-
-        with c3:
-            st.metric(
-                "Score",
-                f"{selected_row['Score']}"
-            )
-
-        with c4:
-            st.metric(
-                "Setup",
-                selected_row["Setup"]
-            )
-
-        st.info(
-            selected_row["Reasons"]
-        )
-
-        st.write(
-            f"**Price Action:** "
-            f"{selected_row['Price Action']}"
-        )
-
-        st.write(
-            f"**Support:** ${selected_row['Support']:.2f}  |  "
-            f"**Resistance:** ${selected_row['Resistance']:.2f}"
-        )
-
-        st.write(
-            f"**Technical Stop:** ${selected_row['Stop']:.2f}  |  "
-            f"**Technical Target:** ${selected_row['Target']:.2f}"
-        )
-
-        # ----------------------------------------------------
-        # PHASE 2
-        # ----------------------------------------------------
-
-        st.divider()
-
-        st.subheader(
-            "Phase 2 — Hughes Options Engine"
-        )
-
-        st.write(
-            "Searches 14–45 DTE options and applies the "
-            "Chuck Hughes 1% rule to option time value."
-        )
-
-        if st.button(
-            f"🔎 FIND OPTION TRADE FOR {selected}",
-            use_container_width=True
-        ):
-
-            stock_dict = {
-                "price": selected_row["Price"],
-                "direction": selected_row["Direction"],
-                "score": selected_row["Score"]
-            }
-
-            with st.spinner(
-                f"Searching {selected} option chain..."
-            ):
-
-                option = select_option(
-                    selected,
-                    stock_dict
-                )
-
-            st.session_state.option_results[
-                selected
-            ] = option
-
-
-        option = st.session_state.option_results.get(
-            selected
-        )
-
-
-        if option is not None:
-
-            trade = build_option_trade(
-                {
-                    "price": selected_row["Price"],
-                    "direction": selected_row["Direction"]
-                },
-                option
-            )
-
-            st.success(
-                "HUGHES 1% RULE PASSED"
-            )
-
-            st.write(
-                f"### {trade['action']}"
-            )
-
-            o1, o2, o3, o4 = st.columns(4)
-
-            with o1:
-                st.metric(
-                    "Expiration",
-                    option["expiration"]
-                )
-
-            with o2:
-                st.metric(
-                    "DTE",
-                    option["dte"]
-                )
-
-            with o3:
-                st.metric(
-                    "Strike",
-                    f"${option['strike']:.2f}"
-                )
-
-            with o4:
-                st.metric(
-                    "Entry",
-                    f"${trade['entry']:.2f}"
-                )
-
-            st.write(
-                f"**Bid:** ${option['bid']:.2f}  |  "
-                f"**Ask:** ${option['ask']:.2f}  |  "
-                f"**Mid:** ${option['mid']:.2f}"
-            )
-
-            st.write(
-                f"**Intrinsic Value:** "
-                f"${option['intrinsic']:.2f}"
-            )
-
-            st.write(
-                f"**Time Value:** "
-                f"${option['time_value']:.2f}"
-            )
-
-            st.write(
-                f"**Maximum 1% Time Value:** "
-                f"${option['max_time_value']:.2f}"
-            )
-
-            st.write(
-                f"**Bid/Ask Spread:** "
-                f"{option['spread_pct']:.1f}%"
-            )
+        if selected:
 
             st.divider()
 
-            t1, t2, t3, t4 = st.columns(4)
-
-            with t1:
-                st.metric(
-                    "Entry",
-                    f"${trade['entry']:.2f}"
-                )
-
-            with t2:
-                st.metric(
-                    "Stop",
-                    f"${trade['stop']:.2f}"
-                )
-
-            with t3:
-                st.metric(
-                    "Target",
-                    f"${trade['target']:.2f}"
-                )
-
-            with t4:
-                st.metric(
-                    "R:R",
-                    f"{trade['rr']:.2f}"
-                )
-
-            st.success(
-                f"Potential trade: "
-                f"Buy-to-Open the {selected} "
-                f"{option['expiration']} "
-                f"{option['strike']:.0f} "
-                f"{option['type'].capitalize()} "
-                f"at ${trade['entry']:.2f} or less."
+            st.subheader(
+                "Selected Golden Setups"
             )
 
-            st.warning(
-                "This is a scanner-generated candidate, "
-                "not a guarantee of profit. Verify the live "
-                "option chain, liquidity and price before trading."
+            for ticker in selected:
+
+                row = results[
+                    results["Ticker"] ==
+                    ticker
+                ].iloc[0]
+
+                with st.expander(
+                    f"🎯 {ticker} — "
+                    f"{row['Setup']} — "
+                    f"Score {row['Score']}",
+                    expanded=True
+                ):
+
+                    c1, c2, c3, c4 = (
+                        st.columns(4)
+                    )
+
+                    with c1:
+
+                        st.metric(
+                            "Price",
+                            f"${row['Price']:.2f}"
+                        )
+
+                    with c2:
+
+                        st.metric(
+                            "Score",
+                            row["Score"]
+                        )
+
+                    with c3:
+
+                        st.metric(
+                            "Relative Volume",
+                            f"{row['Relative Volume']:.2f}x"
+                        )
+
+                    with c4:
+
+                        st.metric(
+                            "RSI",
+                            f"{row['RSI']:.1f}"
+                            if pd.notna(
+                                row["RSI"]
+                            )
+                            else "—"
+                        )
+
+                    st.write(
+                        f"**Setup:** {row['Setup']}"
+                    )
+
+                    st.write(
+                        f"**Price Action:** "
+                        f"{row['Price Action']}"
+                    )
+
+                    st.write(
+                        f"**Crossover:** "
+                        f"{row['Crossover Date']} "
+                        f"({row['Sessions Since Cross']} "
+                        f"sessions ago)"
+                    )
+
+                    st.write(
+                        f"**Support:** "
+                        f"${row['Support']:.2f}   |   "
+                        f"**Resistance:** "
+                        f"${row['Resistance']:.2f}"
+                    )
+
+                    st.write(
+                        f"**Technical Stop:** "
+                        f"${row['Stop']:.2f}   |   "
+                        f"**Technical Target:** "
+                        f"${row['Target']:.2f}"
+                    )
+
+                    st.write(
+                        f"**Confluence:** "
+                        f"{row['Confluence']} elements"
+                    )
+
+                    st.caption(
+                        row["Reasons"]
+                    )
+
+
+        # ====================================================
+        # PHASE 2 BUTTON
+        # ====================================================
+
+        st.divider()
+
+        st.header(
+            "Phase 2 — Hughes CALL Engine"
+        )
+
+        st.write(
+            "The options engine will run ONLY on the "
+            "stocks you checked above."
+        )
+
+        if st.button(
+            "🚀 RUN CALL ENGINE ON SELECTED STOCKS",
+            type="primary",
+            use_container_width=True
+        ):
+
+            if not selected:
+
+                st.warning(
+                    "Please check at least one stock "
+                    "before running Phase 2."
+                )
+
+            else:
+
+                option_results = []
+
+                progress = st.progress(
+                    0
+                )
+
+                status = st.empty()
+
+                total_selected = (
+                    len(selected)
+                )
+
+                for index, ticker in enumerate(
+                    selected
+                ):
+
+                    status.write(
+                        f"Analyzing CALLs: "
+                        f"{ticker} "
+                        f"({index + 1} of "
+                        f"{total_selected})"
+                    )
+
+                    row = results[
+                        results["Ticker"] ==
+                        ticker
+                    ].iloc[0]
+
+                    stock_data = {
+                        "Price": row["Price"],
+                        "Score": row["Score"],
+                        "Setup": row["Setup"]
+                    }
+
+                    option = (
+                        find_best_call(
+                            ticker,
+                            stock_data
+                        )
+                    )
+
+                    if option is None:
+
+                        option_results.append({
+
+                            "Ticker": ticker,
+
+                            "Status": (
+                                "NO CALL PASSED"
+                            ),
+
+                            "Expiration": "—",
+
+                            "DTE": "—",
+
+                            "Strike": "—",
+
+                            "Bid": "—",
+
+                            "Ask": "—",
+
+                            "Time Value": "—",
+
+                            "1% Max TV": "—",
+
+                            "Hughes Rule": (
+                                "NOT PASSED"
+                            )
+                        })
+
+                    else:
+
+                        trade = (
+                            build_call_trade(
+                                row,
+                                option
+                            )
+                        )
+
+                        option_results.append({
+
+                            "Ticker": ticker,
+
+                            "Status": (
+                                "CALL PASSED"
+                            ),
+
+                            "Expiration": (
+                                option[
+                                    "Expiration"
+                                ]
+                            ),
+
+                            "DTE": (
+                                option["DTE"]
+                            ),
+
+                            "Strike": (
+                                option["Strike"]
+                            ),
+
+                            "Bid": (
+                                option["Bid"]
+                            ),
+
+                            "Ask": (
+                                option["Ask"]
+                            ),
+
+                            "Time Value": (
+                                option[
+                                    "Time Value"
+                                ]
+                            ),
+
+                            "1% Max TV": (
+                                option[
+                                    "Max Time Value"
+                                ]
+                            ),
+
+                            "Hughes Rule": (
+                                "PASSED"
+                            ),
+
+                            "Intrinsic": (
+                                option[
+                                    "Intrinsic"
+                                ]
+                            ),
+
+                            "Spread %": (
+                                option[
+                                    "Spread %"
+                                ]
+                            ),
+
+                            "Entry": (
+                                trade["Entry"]
+                            ),
+
+                            "Stop": (
+                                trade["Stop"]
+                            ),
+
+                            "Target": (
+                                trade["Target"]
+                            ),
+
+                            "R:R": (
+                                trade["R:R"]
+                            )
+                        })
+
+                    progress.progress(
+                        (
+                            index + 1
+                        ) /
+                        total_selected
+                    )
+
+                status.empty()
+                progress.empty()
+
+                st.session_state.option_results = (
+                    pd.DataFrame(
+                        option_results
+                    )
+                )
+
+
+# ============================================================
+# PHASE 2 RESULTS
+# ============================================================
+
+option_results = (
+    st.session_state.option_results
+)
+
+
+if option_results is not None:
+
+    st.divider()
+
+    st.header(
+        "🎯 Phase 2 — CALL Results"
+    )
+
+    passed = option_results[
+        option_results[
+            "Status"
+        ] ==
+        "CALL PASSED"
+    ]
+
+    failed = option_results[
+        option_results[
+            "Status"
+        ] ==
+        "NO CALL PASSED"
+    ]
+
+    p1, p2 = st.columns(2)
+
+    with p1:
+
+        st.metric(
+            "CALLs Passed",
+            len(passed)
+        )
+
+    with p2:
+
+        st.metric(
+            "No Contract Passed",
+            len(failed)
+        )
+
+    # --------------------------------------------------------
+    # Passed contracts
+    # --------------------------------------------------------
+
+    if not passed.empty:
+
+        st.subheader(
+            "🔥 CALL Contracts That Passed"
+        )
+
+        for _, row in passed.iterrows():
+
+            ticker = row["Ticker"]
+
+            with st.expander(
+                f"🏆 {ticker} — "
+                f"{row['Expiration']} "
+                f"${row['Strike']:.0f} CALL",
+                expanded=True
+            ):
+
+                c1, c2, c3, c4 = (
+                    st.columns(4)
+                )
+
+                with c1:
+
+                    st.metric(
+                        "Expiration",
+                        row["Expiration"]
+                    )
+
+                with c2:
+
+                    st.metric(
+                        "DTE",
+                        row["DTE"]
+                    )
+
+                with c3:
+
+                    st.metric(
+                        "Strike",
+                        f"${row['Strike']:.2f}"
+                    )
+
+                with c4:
+
+                    st.metric(
+                        "Entry",
+                        f"${row['Entry']:.2f}"
+                    )
+
+                st.success(
+                    "HUGHES 1% RULE PASSED"
+                )
+
+                st.write(
+                    f"**Underlying:** {ticker}"
+                )
+
+                st.write(
+                    f"**CALL:** "
+                    f"{row['Expiration']} "
+                    f"${row['Strike']:.0f}"
+                )
+
+                st.write(
+                    f"**Bid:** ${row['Bid']:.2f}  |  "
+                    f"**Ask:** ${row['Ask']:.2f}"
+                )
+
+                st.write(
+                    f"**Intrinsic Value:** "
+                    f"${row['Intrinsic']:.2f}"
+                )
+
+                st.write(
+                    f"**Time Value:** "
+                    f"${row['Time Value']:.2f}"
+                )
+
+                st.write(
+                    f"**Maximum 1% Time Value:** "
+                    f"${row['1% Max TV']:.2f}"
+                )
+
+                st.write(
+                    f"**Bid/Ask Spread:** "
+                    f"{row['Spread %']:.1f}%"
+                )
+
+                st.divider()
+
+                t1, t2, t3, t4 = (
+                    st.columns(4)
+                )
+
+                with t1:
+
+                    st.metric(
+                        "Buy To Open",
+                        f"${row['Entry']:.2f}"
+                    )
+
+                with t2:
+
+                    st.metric(
+                        "Option Stop",
+                        f"${row['Stop']:.2f}"
+                    )
+
+                with t3:
+
+                    st.metric(
+                        "Option Target",
+                        f"${row['Target']:.2f}"
+                    )
+
+                with t4:
+
+                    st.metric(
+                        "R:R",
+                        f"{row['R:R']:.2f}"
+                    )
+
+                st.success(
+                    f"BUY TO OPEN {ticker} "
+                    f"{row['Expiration']} "
+                    f"${row['Strike']:.0f} CALL "
+                    f"at ${row['Entry']:.2f} or less."
+                )
+
+                st.caption(
+                    "The contract is near-ATM to modestly "
+                    "OTM and passed the 1% time-value rule "
+                    "and liquidity filter."
+                )
+
+
+    # --------------------------------------------------------
+    # Failed contracts
+    # --------------------------------------------------------
+
+    if not failed.empty:
+
+        st.divider()
+
+        st.subheader(
+            "Contracts That Did Not Pass"
+        )
+
+        st.dataframe(
+            failed[
+                [
+                    "Ticker",
+                    "Status"
+                ]
+            ],
+            use_container_width=True,
+            hide_index=True
+        )
+
+
+    # --------------------------------------------------------
+    # Complete option table
+    # --------------------------------------------------------
+
+    st.divider()
+
+    st.subheader(
+        "Phase 2 Summary"
+    )
+
+    summary_columns = [
+        "Ticker",
+        "Status",
+        "Expiration",
+        "DTE",
+        "Strike",
+        "Bid",
+        "Ask",
+        "Time Value",
+        "1% Max TV",
+        "Hughes Rule"
+    ]
+
+    summary = option_results[
+        summary_columns
+    ].copy()
+
+    for column in [
+        "Strike",
+        "Bid",
+        "Ask",
+        "Time Value",
+        "1% Max TV"
+    ]:
+
+        summary[column] = (
+            summary[column]
+            .apply(
+                lambda x:
+                f"${x:.2f}"
+                if isinstance(
+                    x,
+                    (int, float, np.integer, np.floating)
+                )
+                and
+                pd.notna(x)
+                else str(x)
             )
+        )
 
-        elif option is None and selected in st.session_state.option_results:
+    st.dataframe(
+        summary,
+        use_container_width=True,
+        hide_index=True
+    )
 
-            st.warning(
-                "No option contract passed the Hughes 1% "
-                "time-value and liquidity filters for this stock."
-            )
 
-
-# ------------------------------------------------------------
+# ============================================================
 # FOOTER
-# ------------------------------------------------------------
+# ============================================================
 
 st.divider()
 
 st.caption(
-    "Golden Scanner • Technical Phase 1 + Hughes Options Phase 2"
+    "Golden Scanner • Stocks Only • Bullish CALL setups"
 )
 
 st.caption(
-    "Stocks only • $10+ • Optionable universe • "
-    "14–45 DTE • 1% time-value filter"
+    "Technical Phase 1 → User Selection → "
+    "CALL Phase 2 → Hughes 1% Time-Value Rule"
+)
+
+st.caption(
+    "Scanner output is a research tool, not a guarantee "
+    "of future performance. Verify live quotes, liquidity, "
+    "expiration and contract details before trading."
 )
