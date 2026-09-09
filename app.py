@@ -44,7 +44,7 @@ st.set_page_config(
 # ============================================================
 
 MIN_PRICE = 10.00
-MAX_PRICE = 500.00
+MAX_PRICE = 250.00
 
 MIN_RELATIVE_VOLUME = 1.20
 
