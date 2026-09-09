@@ -1829,9 +1829,9 @@ def build_call_trade(
 
 def run_golden_scan():
 
-    universe = (
-        get_dynamic_stock_universe()
-    )
+    universe = get_dynamic_stock_universe()
+
+    universe = filter_universe_by_price(universe)
 
     if not universe:
         return pd.DataFrame(), 0
